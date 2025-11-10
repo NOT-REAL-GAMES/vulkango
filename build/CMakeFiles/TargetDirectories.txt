@@ -1,2 +1,0 @@
-/home/tremor/vulkango/build/CMakeFiles/edit_cache.dir
-/home/tremor/vulkango/build/CMakeFiles/rebuild_cache.dir
