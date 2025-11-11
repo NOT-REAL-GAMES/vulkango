@@ -1,10 +1,6 @@
 #ifndef VULKANGO_CGO_H
 #define VULKANGO_CGO_H
 
-#include "volk/volk.h"
-
-#include "vulkan/vulkan.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
