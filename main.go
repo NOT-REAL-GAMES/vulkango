@@ -8,8 +8,6 @@ package vulkango
 
 */
 import "C"
-import "fmt"
 
 func main() {
-	fmt.Printf("%d", C.VK_SUCCESS)
 }
