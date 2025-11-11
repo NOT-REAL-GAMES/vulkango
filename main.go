@@ -1,9 +1,15 @@
 package vulkango
 
 /*
-#cgo CFLAGS: -I.
-#cgo LDFLAGS: -L. -lvulkango
+#cgo LDFLAGS: -lvulkango
 
 #include "vulkango.h"
+
+
 */
 import "C"
+import "fmt"
+
+func main() {
+	fmt.Printf("%d", C.VK_SUCCESS)
+}
