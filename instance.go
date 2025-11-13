@@ -1,9 +1,8 @@
 package vulkango
 
 // #cgo windows LDFLAGS: -lvulkan-1
-// #cgo linux LDFLAGS: -lvulkan
+// #cgo linux LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lvulkan
 // #cgo darwin LDFLAGS: -lvulkan
-
 // #include <vulkan/vulkan.h>
 import "C"
 
