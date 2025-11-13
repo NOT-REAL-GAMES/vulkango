@@ -1,5 +1,6 @@
 package vulkango
 
+// #include <vulkan/vulkan.h>
 import "C"
 
 import "fmt"
@@ -1260,3 +1261,50 @@ const (
 	PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR           StructureType = 1000361000
 	PHYSICAL_DEVICE_PIPELINE_CACHE_INCREMENTAL_MODE_FEATURES_SEC          StructureType = 1000637000
 )
+
+type PhysicalDevice C.VkPhysicalDevice
+
+type InstanceCreateFlags uint32
+
+type ApplicationInfo struct {
+	ApplicationName    string
+	ApplicationVersion uint32
+	EngineName         string
+	EngineVersion      uint32
+	ApiVersion         uint32
+}
+
+type InstanceCreateInfo struct {
+	Flags                 InstanceCreateFlags
+	ApplicationInfo       *ApplicationInfo
+	EnabledLayerNames     []string
+	EnabledExtensionNames []string
+}
+
+const (
+	ApiVersion_1_0 uint32 = C.VK_API_VERSION_1_0
+	ApiVersion_1_1 uint32 = C.VK_API_VERSION_1_1
+	ApiVersion_1_2 uint32 = C.VK_API_VERSION_1_2
+	ApiVersion_1_3 uint32 = C.VK_API_VERSION_1_3
+	ApiVersion_1_4 uint32 = C.VK_API_VERSION_1_4
+)
+
+func MakeApiVersion(variant, major, minor, patch uint32) uint32 {
+	return (variant << 29) | (major << 22) | (minor << 12) | patch
+}
+
+func ApiVersionVariant(version uint32) uint32 {
+	return version >> 29
+}
+
+func ApiVersionMajor(version uint32) uint32 {
+	return (version >> 22) & 0x7F
+}
+
+func ApiVersionMinor(version uint32) uint32 {
+	return (version >> 12) & 0x3FF
+}
+
+func ApiVersionPatch(version uint32) uint32 {
+	return version & 0xFFF
+}
