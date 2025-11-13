@@ -111,6 +111,7 @@ vulkango/
 
 4. **CGo Requirements**:
    - C compiler required (gcc, clang, or MSVC)
+   - **Windows users**: MSYS2/MinGW64 recommended (install Vulkan via pacman - see troubleshooting section)
    - Vulkan headers must be in include path
    - Vulkan libraries must be in library path
 
@@ -237,6 +238,14 @@ brew install vulkan-headers vulkan-loader
 # Or install full Vulkan SDK from LunarG
 ```
 
+**Windows** (using MSYS2/MinGW64):
+```bash
+# Open MSYS2 MinGW64 terminal
+pacman -S mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader
+```
+
+This installs Vulkan directly into MinGW's paths, allowing CGo to find it automatically without custom environment variables.
+
 **Verification**:
 After installation, verify the development files:
 ```bash
@@ -283,10 +292,46 @@ go version
 echo "go 1.23" >> go.mod  # or whatever version you have
 ```
 
+### Windows: Setting up Vulkan with MinGW/MSYS2
+
+**Recommended approach for Windows users**: Install Vulkan directly into MinGW/MSYS2 environment.
+
+**Prerequisites**:
+1. Install [MSYS2](https://www.msys2.org/) if you haven't already
+2. Open "MSYS2 MinGW 64-bit" terminal (not MSYS2 MSYS)
+
+**Installation**:
+```bash
+# Update package database
+pacman -Syu
+
+# Install Vulkan headers and loader
+pacman -S mingw-w64-x86_64-vulkan-headers mingw-w64-x86_64-vulkan-loader
+
+# Install GCC toolchain if needed
+pacman -S mingw-w64-x86_64-gcc
+```
+
+**Build your Go project**:
+```bash
+# In MSYS2 MinGW64 terminal
+cd /c/path/to/vulkango
+go build
+```
+
+**Why this works**:
+- Vulkan is installed to MinGW's standard paths (`/mingw64/include`, `/mingw64/lib`)
+- CGo automatically finds libraries in MinGW's paths
+- No environment variables or custom paths needed
+- Works with any Vulkan SDK version
+
+**Note**: You still need GPU drivers that support Vulkan for runtime execution. The MinGW packages provide the development headers and loader library for compilation.
+
 ### Missing Vulkan Driver
 
 If build succeeds but runtime fails with "cannot find Vulkan driver":
 - Install GPU-specific Vulkan drivers (nvidia-vulkan, mesa-vulkan-drivers, etc.)
+- **Windows**: Update your GPU drivers from NVIDIA, AMD, or Intel
 - Verify with: `vulkaninfo` or `vkcube` (from vulkan-tools package)
 
 ## Quick Reference
