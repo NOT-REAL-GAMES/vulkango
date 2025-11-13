@@ -188,12 +188,83 @@ func VulkanFunctionName(param Type) (ReturnType, error) {
 - Extension support
 - Validation layers integration
 
+## Troubleshooting
+
+### Build Error: "undefined reference to vkEnumerateInstanceVersion"
+
+**Problem**: Linker cannot find Vulkan functions during build.
+
+**Symptoms**:
+```
+/usr/bin/ld: undefined reference to `vkEnumerateInstanceVersion'
+collect2: error: ld returned 1 exit status
+```
+
+**Diagnosis**:
+This occurs when you have the Vulkan runtime library (`libvulkan1`) but not the development files.
+
+Check what's installed:
+```bash
+# Check for runtime library (should exist)
+ldconfig -p | grep vulkan
+
+# Check for development files (may be missing)
+ls -la /usr/lib/x86_64-linux-gnu/libvulkan.so
+find /usr -name "vulkan.h" 2>/dev/null
+```
+
+**Solution by Platform**:
+
+**Ubuntu/Debian**:
+```bash
+sudo apt-get update
+sudo apt-get install libvulkan-dev
+```
+
+**Fedora/RHEL**:
+```bash
+sudo dnf install vulkan-headers vulkan-loader-devel
+```
+
+**Arch Linux**:
+```bash
+sudo pacman -S vulkan-headers vulkan-icd-loader
+```
+
+**macOS** (using Homebrew):
+```bash
+brew install vulkan-headers vulkan-loader
+# Or install full Vulkan SDK from LunarG
+```
+
+**Verification**:
+After installation, verify the development files:
+```bash
+# Should show libvulkan.so symlink
+ls -la /usr/lib/x86_64-linux-gnu/libvulkan*
+
+# Should find vulkan.h header
+find /usr -name "vulkan.h" 2>/dev/null
+```
+
+Then rebuild:
+```bash
+cd examples
+go build test.go
+```
+
+### Missing Vulkan Driver
+
+If build succeeds but runtime fails with "cannot find Vulkan driver":
+- Install GPU-specific Vulkan drivers (nvidia-vulkan, mesa-vulkan-drivers, etc.)
+- Verify with: `vulkaninfo` or `vkcube` (from vulkan-tools package)
+
 ## Quick Reference
 
 ### Building Examples
 ```bash
 cd examples
-go run test.go
+go build test.go
 ```
 
 ### Importing the Library
