@@ -1,7 +1,6 @@
 package vulkango
 
-// #cgo windows LDFLAGS: -L${VULKAN_SDK}/Lib -lvulkan-1
-// #cgo windows CFLAGS: -I${VULKAN_SDK}/Include
+// #cgo windows LDFLAGS: -lvulkan-1
 // #cgo linux LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lvulkan
 // #cgo darwin LDFLAGS: -lvulkan
 // #include <vulkan/vulkan.h>
