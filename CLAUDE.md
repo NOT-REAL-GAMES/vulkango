@@ -253,6 +253,36 @@ cd examples
 go build test.go
 ```
 
+### Alternative Fix: Explicit Library Path
+
+If installing `libvulkan-dev` doesn't resolve the linker error, the linker may need an explicit library path. This has been fixed in `instance.go` with:
+
+```go
+// #cgo linux LDFLAGS: -L/usr/lib/x86_64-linux-gnu -lvulkan
+```
+
+This explicitly tells the linker where to find the Vulkan library on Linux systems.
+
+### Go Version Issues
+
+**Problem**: Build fails trying to download non-existent Go version.
+
+**Symptoms**:
+```
+go: downloading go1.25.1 (linux/amd64)
+go: download go1.25.1: ... connection refused
+```
+
+**Solution**:
+Ensure `go.mod` specifies a valid, released Go version (e.g., 1.23 or 1.24):
+```bash
+# Check your installed Go version
+go version
+
+# Update go.mod to match or use GOTOOLCHAIN=local
+echo "go 1.23" >> go.mod  # or whatever version you have
+```
+
 ### Missing Vulkan Driver
 
 If build succeeds but runtime fails with "cannot find Vulkan driver":
