@@ -14,7 +14,7 @@ func main() {
 	}
 	defer sdl.Quit()
 
-	window, err := sdl.CreateWindow("SDL3 + Vulkan", 960, 540, sdl.WINDOW_VULKAN)
+	window, err := sdl.CreateWindow("Example", 960, 540, sdl.WINDOW_VULKAN)
 	if err != nil {
 		panic(err)
 	}
@@ -35,9 +35,9 @@ func main() {
 
 	instance, err := vk.CreateInstance(&vk.InstanceCreateInfo{
 		ApplicationInfo: &vk.ApplicationInfo{
-			ApplicationName:    "VulkanGo Test",
+			ApplicationName:    "Example Application",
 			ApplicationVersion: vk.MakeApiVersion(0, 1, 0, 0),
-			EngineName:         "No Engine",
+			EngineName:         "Example Engine",
 			EngineVersion:      vk.MakeApiVersion(0, 1, 0, 0),
 			ApiVersion:         vk.ApiVersion_1_4,
 		},
