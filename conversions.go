@@ -1,109 +1,101 @@
+// conversions.go
 package vulkango
 
 /*
 #include <vulkan/vulkan.h>
 #include <stdlib.h>
+#include <string.h>
 */
 import "C"
-import (
-	"unsafe"
-)
+import "unsafe"
 
-// Vulkanizable types can convert themselves to C structs
-type Vulkanizable interface {
-	vulkanize() unsafe.Pointer
-	free()
+type instanceCreateInfoData struct {
+	cInfo       *C.VkInstanceCreateInfo
+	cAppInfo    *C.VkApplicationInfo
+	cLayers     []*C.char
+	cExtensions []*C.char
 }
 
-// ApplicationInfo
-func (info *ApplicationInfo) vulkanize() unsafe.Pointer {
-	cInfo := (*C.VkApplicationInfo)(C.malloc(C.sizeof_VkApplicationInfo))
-	cInfo.sType = C.VK_STRUCTURE_TYPE_APPLICATION_INFO
-	cInfo.pNext = nil
+func (info *InstanceCreateInfo) vulkanize() *instanceCreateInfoData {
+	data := &instanceCreateInfoData{}
 
-	if info.ApplicationName != "" {
-		cInfo.pApplicationName = C.CString(info.ApplicationName)
-	}
-	cInfo.applicationVersion = C.uint32_t(info.ApplicationVersion)
-
-	if info.EngineName != "" {
-		cInfo.pEngineName = C.CString(info.EngineName)
-	}
-	cInfo.engineVersion = C.uint32_t(info.EngineVersion)
-	cInfo.apiVersion = C.uint32_t(info.ApiVersion)
-
-	return unsafe.Pointer(cInfo)
-}
-
-func (info *ApplicationInfo) free() {
-	cInfo := (*C.VkApplicationInfo)(info.vulkanize())
-	if cInfo.pApplicationName != nil {
-		C.free(unsafe.Pointer(cInfo.pApplicationName))
-	}
-	if cInfo.pEngineName != nil {
-		C.free(unsafe.Pointer(cInfo.pEngineName))
-	}
-	C.free(unsafe.Pointer(cInfo))
-}
-
-// InstanceCreateInfo
-
-func (info *InstanceCreateInfo) vulkanize() unsafe.Pointer {
-	cInfo := (*C.VkInstanceCreateInfo)(C.malloc(C.sizeof_VkInstanceCreateInfo))
-	cInfo.sType = C.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
-	cInfo.pNext = nil
-	cInfo.flags = C.VkInstanceCreateFlags(info.Flags)
+	// Allocate and ZERO the main struct (calloc instead of malloc)
+	data.cInfo = (*C.VkInstanceCreateInfo)(C.calloc(1, C.sizeof_VkInstanceCreateInfo))
+	data.cInfo.sType = C.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+	data.cInfo.pNext = nil
+	data.cInfo.flags = C.VkInstanceCreateFlags(info.Flags)
 
 	// Application info
 	if info.ApplicationInfo != nil {
-		cInfo.pApplicationInfo = (*C.VkApplicationInfo)(info.ApplicationInfo.vulkanize())
+		data.cAppInfo = (*C.VkApplicationInfo)(C.calloc(1, C.sizeof_VkApplicationInfo))
+		data.cAppInfo.sType = C.VK_STRUCTURE_TYPE_APPLICATION_INFO
+		data.cAppInfo.pNext = nil
+		data.cAppInfo.pApplicationName = nil
+		data.cAppInfo.applicationVersion = C.uint32_t(info.ApplicationInfo.ApplicationVersion)
+		data.cAppInfo.pEngineName = nil
+		data.cAppInfo.engineVersion = C.uint32_t(info.ApplicationInfo.EngineVersion)
+		data.cAppInfo.apiVersion = C.uint32_t(info.ApplicationInfo.ApiVersion)
+
+		if info.ApplicationInfo.ApplicationName != "" {
+			data.cAppInfo.pApplicationName = C.CString(info.ApplicationInfo.ApplicationName)
+		}
+
+		if info.ApplicationInfo.EngineName != "" {
+			data.cAppInfo.pEngineName = C.CString(info.ApplicationInfo.EngineName)
+		}
+
+		data.cInfo.pApplicationInfo = data.cAppInfo
+	} else {
+		data.cInfo.pApplicationInfo = nil
 	}
 
 	// Layers
+	data.cInfo.enabledLayerCount = 0
+	data.cInfo.ppEnabledLayerNames = nil
 	if len(info.EnabledLayerNames) > 0 {
-		cLayers := make([]*C.char, len(info.EnabledLayerNames))
+		data.cLayers = make([]*C.char, len(info.EnabledLayerNames))
 		for i, layer := range info.EnabledLayerNames {
-			cLayers[i] = C.CString(layer)
+			data.cLayers[i] = C.CString(layer)
 		}
-		cInfo.enabledLayerCount = C.uint32_t(len(cLayers))
-		cInfo.ppEnabledLayerNames = &cLayers[0]
+		data.cInfo.enabledLayerCount = C.uint32_t(len(data.cLayers))
+		data.cInfo.ppEnabledLayerNames = (**C.char)(unsafe.Pointer(&data.cLayers[0]))
 	}
 
 	// Extensions
+	data.cInfo.enabledExtensionCount = 0
+	data.cInfo.ppEnabledExtensionNames = nil
 	if len(info.EnabledExtensionNames) > 0 {
-		cExts := make([]*C.char, len(info.EnabledExtensionNames))
+		data.cExtensions = make([]*C.char, len(info.EnabledExtensionNames))
 		for i, ext := range info.EnabledExtensionNames {
-			cExts[i] = C.CString(ext)
+			data.cExtensions[i] = C.CString(ext)
 		}
-		cInfo.enabledExtensionCount = C.uint32_t(len(cExts))
-		cInfo.ppEnabledExtensionNames = &cExts[0]
+		data.cInfo.enabledExtensionCount = C.uint32_t(len(data.cExtensions))
+		data.cInfo.ppEnabledExtensionNames = (**C.char)(unsafe.Pointer(&data.cExtensions[0]))
 	}
 
-	return unsafe.Pointer(cInfo)
+	return data
 }
 
-func (info *InstanceCreateInfo) free() {
-	cInfo := (*C.VkInstanceCreateInfo)(info.vulkanize())
-
-	if cInfo.pApplicationInfo != nil {
-		C.free(unsafe.Pointer(cInfo.pApplicationInfo))
-	}
-
-	// Free layer strings
-	if cInfo.enabledLayerCount > 0 {
-		layers := (*[1 << 30]*C.char)(unsafe.Pointer(cInfo.ppEnabledLayerNames))[:cInfo.enabledLayerCount:cInfo.enabledLayerCount]
-		for _, layer := range layers {
-			C.free(unsafe.Pointer(layer))
+func (data *instanceCreateInfoData) free() {
+	if data.cAppInfo != nil {
+		if data.cAppInfo.pApplicationName != nil {
+			C.free(unsafe.Pointer(data.cAppInfo.pApplicationName))
 		}
-	}
-
-	// Free extension strings
-	if cInfo.enabledExtensionCount > 0 {
-		exts := (*[1 << 30]*C.char)(unsafe.Pointer(cInfo.ppEnabledExtensionNames))[:cInfo.enabledExtensionCount:cInfo.enabledExtensionCount]
-		for _, ext := range exts {
-			C.free(unsafe.Pointer(ext))
+		if data.cAppInfo.pEngineName != nil {
+			C.free(unsafe.Pointer(data.cAppInfo.pEngineName))
 		}
+		C.free(unsafe.Pointer(data.cAppInfo))
 	}
 
-	C.free(unsafe.Pointer(cInfo))
+	for _, layer := range data.cLayers {
+		C.free(unsafe.Pointer(layer))
+	}
+
+	for _, ext := range data.cExtensions {
+		C.free(unsafe.Pointer(ext))
+	}
+
+	if data.cInfo != nil {
+		C.free(unsafe.Pointer(data.cInfo))
+	}
 }

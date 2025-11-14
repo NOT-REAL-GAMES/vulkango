@@ -1262,7 +1262,9 @@ const (
 	PHYSICAL_DEVICE_PIPELINE_CACHE_INCREMENTAL_MODE_FEATURES_SEC          StructureType = 1000637000
 )
 
-type PhysicalDevice C.VkPhysicalDevice
+type PhysicalDevice struct {
+	handle C.VkPhysicalDevice
+}
 
 type InstanceCreateFlags uint32
 
