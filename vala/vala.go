@@ -713,10 +713,8 @@ func main() {
 				}
 			}
 
-			time.Sleep(time.Millisecond * 5)
-
 			// Wait for previous frame
-			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
+			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(10))
 			device.ResetFences([]vk.Fence{inFlightFence})
 
 			// Acquire next image
@@ -861,7 +859,8 @@ func main() {
 		}
 
 		// Wait for device to finish
-		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
+		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(10))
 
+		time.Sleep(5 * time.Millisecond)
 	}
 }
