@@ -101,7 +101,7 @@ func main() {
 	}
 	defer sdl.Quit()
 
-	window, err := sdl.CreateWindow("Example", 960, 960, sdl.WINDOW_VULKAN)
+	window, err := sdl.CreateWindow("Vala", 960, 960, sdl.WINDOW_VULKAN)
 	if err != nil {
 		panic(err)
 	}
@@ -123,9 +123,9 @@ func main() {
 
 	instance, err := vk.CreateInstance(&vk.InstanceCreateInfo{
 		ApplicationInfo: &vk.ApplicationInfo{
-			ApplicationName:    "Example Application",
+			ApplicationName:    "Vala Editor",
 			ApplicationVersion: vk.MakeApiVersion(0, 1, 0, 0),
-			EngineName:         "Example Engine",
+			EngineName:         "Vala",
 			EngineVersion:      vk.MakeApiVersion(0, 1, 0, 0),
 			ApiVersion:         vk.ApiVersion_1_4,
 		},

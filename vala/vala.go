@@ -1,4 +1,4 @@
-package vala
+package main
 
 import (
 	"fmt"
