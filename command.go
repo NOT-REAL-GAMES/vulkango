@@ -376,3 +376,126 @@ func (cmd CommandBuffer) PipelineBarrier(
 		C.uint32_t(len(cBarriers)), pImageBarriers,
 	)
 }
+
+// Add to command.go
+
+type IndexType int32
+
+const (
+	INDEX_TYPE_UINT16 IndexType = C.VK_INDEX_TYPE_UINT16
+	INDEX_TYPE_UINT32 IndexType = C.VK_INDEX_TYPE_UINT32
+)
+
+func (cmd CommandBuffer) BindVertexBuffers(firstBinding uint32, buffers []Buffer, offsets []uint64) {
+	cBuffers := make([]C.VkBuffer, len(buffers))
+	cOffsets := make([]C.VkDeviceSize, len(offsets))
+
+	for i, buf := range buffers {
+		cBuffers[i] = buf.handle
+	}
+	for i, off := range offsets {
+		cOffsets[i] = C.VkDeviceSize(off)
+	}
+
+	C.vkCmdBindVertexBuffers(cmd.handle, C.uint32_t(firstBinding), C.uint32_t(len(cBuffers)), &cBuffers[0], &cOffsets[0])
+}
+
+func (cmd CommandBuffer) BindIndexBuffer(buffer Buffer, offset uint64, indexType IndexType) {
+	C.vkCmdBindIndexBuffer(cmd.handle, buffer.handle, C.VkDeviceSize(offset), C.VkIndexType(indexType))
+}
+
+func (cmd CommandBuffer) DrawIndexed(indexCount, instanceCount, firstIndex uint32, vertexOffset int32, firstInstance uint32) {
+	C.vkCmdDrawIndexed(cmd.handle, C.uint32_t(indexCount), C.uint32_t(instanceCount),
+		C.uint32_t(firstIndex), C.int32_t(vertexOffset), C.uint32_t(firstInstance))
+}
+
+// Add to command.go
+
+// Buffer to Image Copy
+type BufferImageCopy struct {
+	BufferOffset      uint64
+	BufferRowLength   uint32
+	BufferImageHeight uint32
+	ImageSubresource  ImageSubresourceLayers
+	ImageOffset       Offset3D
+	ImageExtent       Extent3D
+}
+
+type ImageSubresourceLayers struct {
+	AspectMask     ImageAspectFlags
+	MipLevel       uint32
+	BaseArrayLayer uint32
+	LayerCount     uint32
+}
+
+type Offset3D struct {
+	X int32
+	Y int32
+	Z int32
+}
+
+func (cmd CommandBuffer) CopyBufferToImage(srcBuffer Buffer, dstImage Image, dstImageLayout ImageLayout, regions []BufferImageCopy) {
+	cRegions := make([]C.VkBufferImageCopy, len(regions))
+	for i, region := range regions {
+		cRegions[i].bufferOffset = C.VkDeviceSize(region.BufferOffset)
+		cRegions[i].bufferRowLength = C.uint32_t(region.BufferRowLength)
+		cRegions[i].bufferImageHeight = C.uint32_t(region.BufferImageHeight)
+		cRegions[i].imageSubresource.aspectMask = C.VkImageAspectFlags(region.ImageSubresource.AspectMask)
+		cRegions[i].imageSubresource.mipLevel = C.uint32_t(region.ImageSubresource.MipLevel)
+		cRegions[i].imageSubresource.baseArrayLayer = C.uint32_t(region.ImageSubresource.BaseArrayLayer)
+		cRegions[i].imageSubresource.layerCount = C.uint32_t(region.ImageSubresource.LayerCount)
+		cRegions[i].imageOffset.x = C.int32_t(region.ImageOffset.X)
+		cRegions[i].imageOffset.y = C.int32_t(region.ImageOffset.Y)
+		cRegions[i].imageOffset.z = C.int32_t(region.ImageOffset.Z)
+		cRegions[i].imageExtent.width = C.uint32_t(region.ImageExtent.Width)
+		cRegions[i].imageExtent.height = C.uint32_t(region.ImageExtent.Height)
+		cRegions[i].imageExtent.depth = C.uint32_t(region.ImageExtent.Depth)
+	}
+
+	C.vkCmdCopyBufferToImage(cmd.handle, srcBuffer.handle, dstImage.handle,
+		C.VkImageLayout(dstImageLayout),
+		C.uint32_t(len(cRegions)), &cRegions[0])
+}
+
+// Descriptor Set Binding
+func (cmd CommandBuffer) BindDescriptorSets(
+	pipelineBindPoint PipelineBindPoint,
+	layout PipelineLayout,
+	firstSet uint32,
+	descriptorSets []DescriptorSet,
+	dynamicOffsets []uint32,
+) {
+	var cSets []C.VkDescriptorSet
+	if len(descriptorSets) > 0 {
+		cSets = make([]C.VkDescriptorSet, len(descriptorSets))
+		for i, set := range descriptorSets {
+			cSets[i] = set.handle
+		}
+	}
+
+	var cOffsets []C.uint32_t
+	var pOffsets *C.uint32_t
+	if len(dynamicOffsets) > 0 {
+		cOffsets = make([]C.uint32_t, len(dynamicOffsets))
+		for i, offset := range dynamicOffsets {
+			cOffsets[i] = C.uint32_t(offset)
+		}
+		pOffsets = &cOffsets[0]
+	}
+
+	var pSets *C.VkDescriptorSet
+	if len(cSets) > 0 {
+		pSets = &cSets[0]
+	}
+
+	C.vkCmdBindDescriptorSets(
+		cmd.handle,
+		C.VkPipelineBindPoint(pipelineBindPoint),
+		layout.handle,
+		C.uint32_t(firstSet),
+		C.uint32_t(len(cSets)),
+		pSets,
+		C.uint32_t(len(cOffsets)),
+		pOffsets,
+	)
+}

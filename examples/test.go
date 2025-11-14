@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
+	"unsafe"
 
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
@@ -12,23 +14,17 @@ import (
 const vertexShader = `
 #version 450
 
+layout(location = 0) in vec2 inPosition;
+layout(location = 1) in vec3 inColor;
+layout(location = 2) in vec2 inTexCoord;
+
 layout(location = 0) out vec3 fragColor;
-
-vec2 positions[3] = vec2[](
-    vec2(0.0, -0.5),
-    vec2(0.5, 0.5),
-    vec2(-0.5, 0.5)
-);
-
-vec3 colors[3] = vec3[](
-    vec3(1.0, 0.0, 0.0),
-    vec3(0.0, 1.0, 0.0),
-    vec3(0.0, 0.0, 1.0)
-);
+layout(location = 1) out vec2 fragTexCoord;
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    fragColor = colors[gl_VertexIndex];
+    gl_Position = vec4(inPosition, 0.0, 1.0);
+    fragColor = inColor;
+    fragTexCoord = inTexCoord;
 }
 `
 
@@ -36,14 +32,28 @@ const fragmentShader = `
 #version 450
 
 layout(location = 0) in vec3 fragColor;
+layout(location = 1) in vec2 fragTexCoord;
+
+layout(binding = 0) uniform sampler2D texSampler;
+
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    outColor = vec4(fragColor, 1.0);
+    vec4 texColor = texture(texSampler, fragTexCoord);
+    outColor = texColor * vec4(fragColor, 1.0);
 }
 `
 
+type Vertex struct {
+	Pos      [2]float32
+	Color    [3]float32
+	TexCoord [2]float32
+}
+
 func main() {
+
+	os.Setenv("SDL_VIDEODRIVER", "X11")
+
 	// Initialize SDL first
 	if err := sdl.Init(sdl.INIT_VIDEO); err != nil {
 		panic(err)
@@ -258,8 +268,25 @@ func main() {
 
 		fmt.Println("\nShaders compiled and modules created!")
 
+		descriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Bindings: []vk.DescriptorSetLayoutBinding{
+				{
+					Binding:         0,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: 1,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorSetLayout(descriptorSetLayout)
+
 		// After creating shader modules
-		pipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{})
+		pipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			SetLayouts: []vk.DescriptorSetLayout{descriptorSetLayout},
+		})
 		if err != nil {
 			panic(err)
 		}
@@ -267,19 +294,23 @@ func main() {
 
 		pipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
 			Stages: []vk.PipelineShaderStageCreateInfo{
-				{
-					Stage:  vk.SHADER_STAGE_VERTEX_BIT,
-					Module: vertModule,
-					Name:   "main",
-				},
-				{
-					Stage:  vk.SHADER_STAGE_FRAGMENT_BIT,
-					Module: fragModule,
-					Name:   "main",
-				},
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: vertModule, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: fragModule, Name: "main"},
 			},
-			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{},
-			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{
+						Binding:   0,
+						Stride:    uint32(unsafe.Sizeof(Vertex{})),
+						InputRate: vk.VERTEX_INPUT_RATE_VERTEX,
+					},
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{Location: 0, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 0},    // Position
+					{Location: 1, Binding: 0, Format: vk.FORMAT_R32G32B32_SFLOAT, Offset: 8}, // Color
+					{Location: 2, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 20},   // TexCoord
+				},
+			}, InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
 				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
 			},
 			ViewportState: &vk.PipelineViewportStateCreateInfo{
@@ -321,6 +352,59 @@ func main() {
 
 		fmt.Println("Graphics pipeline created!")
 
+		// Quad vertices (2 triangles)
+		vertices := []Vertex{
+			{Pos: [2]float32{-0.5, -0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 0.0}}, // Bottom-left
+			{Pos: [2]float32{0.5, -0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 0.0}},  // Bottom-right
+			{Pos: [2]float32{0.5, 0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 1.0}},   // Top-right
+			{Pos: [2]float32{-0.5, 0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 1.0}},  // Top-left
+		}
+		indices := []uint16{0, 1, 2, 2, 3, 0}
+
+		// Create vertex buffer
+		vertexBufferSize := uint64(len(vertices) * int(unsafe.Sizeof(Vertex{})))
+		vertexBuffer, vertexMemory, err := device.CreateBufferWithMemory(
+			vertexBufferSize,
+			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(vertexBuffer)
+		defer device.FreeMemory(vertexMemory)
+
+		// Upload vertex data
+		vertexData := (*[1 << 30]byte)(unsafe.Pointer(&vertices[0]))[:vertexBufferSize:vertexBufferSize]
+		err = device.UploadToBuffer(vertexMemory, vertexData)
+		if err != nil {
+			panic(err)
+		}
+
+		// Create index buffer
+		indexBufferSize := uint64(len(indices) * 2) // uint16 = 2 bytes
+		indexBuffer, indexMemory, err := device.CreateBufferWithMemory(
+			indexBufferSize,
+			vk.BUFFER_USAGE_INDEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(indexBuffer)
+		defer device.FreeMemory(indexMemory)
+
+		// Upload index data
+		indexData := (*[1 << 30]byte)(unsafe.Pointer(&indices[0]))[:indexBufferSize:indexBufferSize]
+		err = device.UploadToBuffer(indexMemory, indexData)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Vertex and index buffers created!")
+
 		// Create command pool
 		commandPool, err := device.CreateCommandPool(&vk.CommandPoolCreateInfo{
 			Flags:            vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -330,6 +414,217 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyCommandPool(commandPool)
+
+		fmt.Println("\nCreating texture...")
+
+		// Create 2x2 checkerboard texture data (RGBA)
+		textureWidth := uint32(2)
+		textureHeight := uint32(2)
+		textureData := []byte{
+			255, 0, 0, 255, // Red
+			0, 255, 0, 255, // Green
+			0, 0, 255, 255, // Blue
+			255, 255, 0, 255, // Yellow
+		}
+		textureSize := uint64(len(textureData))
+
+		// Create staging buffer
+		stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(
+			textureSize,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		// Upload texture data to staging buffer
+		err = device.UploadToBuffer(stagingMemory, textureData)
+		if err != nil {
+			panic(err)
+		}
+
+		// Create texture image
+		textureImage, textureMemory, err := device.CreateImageWithMemory(
+			textureWidth, textureHeight,
+			vk.FORMAT_R8G8B8A8_SRGB,
+			vk.IMAGE_TILING_OPTIMAL,
+			vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyImage(textureImage)
+		defer device.FreeMemory(textureMemory)
+
+		// Create command buffer for texture upload
+		uploadCmdBuffer, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+			CommandPool:        commandPool,
+			Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+			CommandBufferCount: 1,
+		})
+		if err != nil {
+			panic(err)
+		}
+		uploadCmd := uploadCmdBuffer[0]
+
+		// Record upload commands
+		uploadCmd.Begin(&vk.CommandBufferBeginInfo{
+			Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+		})
+
+		// Transition image to transfer dst
+		uploadCmd.PipelineBarrier(
+			vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			vk.PIPELINE_STAGE_TRANSFER_BIT,
+			0,
+			[]vk.ImageMemoryBarrier{
+				{
+					SrcAccessMask:       vk.ACCESS_NONE,
+					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               textureImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
+			},
+		)
+
+		// Copy buffer to image
+		uploadCmd.CopyBufferToImage(stagingBuffer, textureImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, []vk.BufferImageCopy{
+			{
+				BufferOffset:      0,
+				BufferRowLength:   0,
+				BufferImageHeight: 0,
+				ImageSubresource: vk.ImageSubresourceLayers{
+					AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+					MipLevel:       0,
+					BaseArrayLayer: 0,
+					LayerCount:     1,
+				},
+				ImageOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+				ImageExtent: vk.Extent3D{Width: textureWidth, Height: textureHeight, Depth: 1},
+			},
+		})
+
+		// Transition image to shader read
+		uploadCmd.PipelineBarrier(
+			vk.PIPELINE_STAGE_TRANSFER_BIT,
+			vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0,
+			[]vk.ImageMemoryBarrier{
+				{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               textureImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
+			},
+		)
+
+		uploadCmd.End()
+
+		// Submit and wait
+		queue.Submit([]vk.SubmitInfo{
+			{CommandBuffers: []vk.CommandBuffer{uploadCmd}},
+		}, vk.Fence{})
+		queue.WaitIdle()
+
+		// Clean up staging buffer
+		device.DestroyBuffer(stagingBuffer)
+		device.FreeMemory(stagingMemory)
+
+		// Create texture image view
+		textureImageView, err := device.CreateImageViewForTexture(textureImage, vk.FORMAT_R8G8B8A8_SRGB)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyImageView(textureImageView)
+
+		// Create sampler
+		textureSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
+			MagFilter:    vk.FILTER_NEAREST, // Use NEAREST to see the checkerboard clearly
+			MinFilter:    vk.FILTER_NEAREST,
+			MipmapMode:   vk.SAMPLER_MIPMAP_MODE_NEAREST,
+			AddressModeU: vk.SAMPLER_ADDRESS_MODE_REPEAT,
+			AddressModeV: vk.SAMPLER_ADDRESS_MODE_REPEAT,
+			AddressModeW: vk.SAMPLER_ADDRESS_MODE_REPEAT,
+			MaxLod:       1.0,
+			BorderColor:  vk.BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroySampler(textureSampler)
+
+		fmt.Println("Texture created!")
+
+		// Create descriptor set layout
+
+		// Create descriptor pool
+		descriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			MaxSets: 1,
+			PoolSizes: []vk.DescriptorPoolSize{
+				{
+					Type:            vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: 1,
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorPool(descriptorPool)
+
+		// Allocate descriptor set
+		descriptorSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+			DescriptorPool: descriptorPool,
+			SetLayouts:     []vk.DescriptorSetLayout{descriptorSetLayout},
+		})
+		if err != nil {
+			panic(err)
+		}
+		descriptorSet := descriptorSets[0]
+
+		// Update descriptor set with texture
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          descriptorSet,
+				DstBinding:      0,
+				DstArrayElement: 0,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{
+					{
+						Sampler:     textureSampler,
+						ImageView:   textureImageView,
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					},
+				},
+			},
+		})
+
+		fmt.Println("Descriptor sets created and updated!")
 
 		// Allocate command buffers (one per swapchain image)
 		commandBuffers, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -443,6 +738,15 @@ func main() {
 
 			// Bind pipeline and set dynamic state
 			cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+
+			cmd.BindDescriptorSets(
+				vk.PIPELINE_BIND_POINT_GRAPHICS,
+				pipelineLayout,
+				0,
+				[]vk.DescriptorSet{descriptorSet},
+				nil,
+			)
+
 			cmd.SetViewport(0, []vk.Viewport{
 				{
 					X:        0,
@@ -461,7 +765,9 @@ func main() {
 			})
 
 			// Draw triangle!
-			cmd.Draw(3, 1, 0, 0)
+			cmd.BindVertexBuffers(0, []vk.Buffer{vertexBuffer}, []uint64{0})
+			cmd.BindIndexBuffer(indexBuffer, 0, vk.INDEX_TYPE_UINT16)
+			cmd.DrawIndexed(uint32(len(indices)), 1, 0, 0, 0)
 
 			cmd.EndRendering()
 

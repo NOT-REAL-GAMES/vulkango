@@ -10,6 +10,7 @@ import "C"
 import "unsafe"
 
 // Pipeline Layout
+/*
 func (device Device) CreatePipelineLayout(createInfo *PipelineLayoutCreateInfo) (PipelineLayout, error) {
 	cInfo := (*C.VkPipelineLayoutCreateInfo)(C.calloc(1, C.sizeof_VkPipelineLayoutCreateInfo))
 	defer C.free(unsafe.Pointer(cInfo))
@@ -24,6 +25,21 @@ func (device Device) CreatePipelineLayout(createInfo *PipelineLayoutCreateInfo) 
 
 	var layout C.VkPipelineLayout
 	result := C.vkCreatePipelineLayout(device.handle, cInfo, nil, &layout)
+
+	if result != C.VK_SUCCESS {
+		return PipelineLayout{}, Result(result)
+	}
+
+	return PipelineLayout{handle: layout}, nil
+}
+*/
+
+func (device Device) CreatePipelineLayout(createInfo *PipelineLayoutCreateInfo) (PipelineLayout, error) {
+	data := createInfo.vulkanize()
+	defer data.free()
+
+	var layout C.VkPipelineLayout
+	result := C.vkCreatePipelineLayout(device.handle, data.cInfo, nil, &layout)
 
 	if result != C.VK_SUCCESS {
 		return PipelineLayout{}, Result(result)
@@ -46,6 +62,8 @@ type graphicsPipelineData struct {
 	shaderStages          []C.VkPipelineShaderStageCreateInfo
 	shaderEntryNames      []*C.char
 	vertexInputState      *C.VkPipelineVertexInputStateCreateInfo
+	vertexBindings        []C.VkVertexInputBindingDescription
+	vertexAttributes      []C.VkVertexInputAttributeDescription
 	inputAssemblyState    *C.VkPipelineInputAssemblyStateCreateInfo
 	viewportState         *C.VkPipelineViewportStateCreateInfo
 	viewports             []C.VkViewport
@@ -95,10 +113,38 @@ func (info *GraphicsPipelineCreateInfo) vulkanize() *graphicsPipelineData {
 		data.vertexInputState.sType = C.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
 		data.vertexInputState.pNext = nil
 		data.vertexInputState.flags = 0
-		data.vertexInputState.vertexBindingDescriptionCount = 0
-		data.vertexInputState.pVertexBindingDescriptions = nil
-		data.vertexInputState.vertexAttributeDescriptionCount = 0
-		data.vertexInputState.pVertexAttributeDescriptions = nil
+
+		// Vertex binding descriptions
+		if len(info.VertexInputState.VertexBindingDescriptions) > 0 {
+			data.vertexBindings = make([]C.VkVertexInputBindingDescription, len(info.VertexInputState.VertexBindingDescriptions))
+			for i, binding := range info.VertexInputState.VertexBindingDescriptions {
+				data.vertexBindings[i].binding = C.uint32_t(binding.Binding)
+				data.vertexBindings[i].stride = C.uint32_t(binding.Stride)
+				data.vertexBindings[i].inputRate = C.VkVertexInputRate(binding.InputRate)
+			}
+			data.vertexInputState.vertexBindingDescriptionCount = C.uint32_t(len(data.vertexBindings))
+			data.vertexInputState.pVertexBindingDescriptions = &data.vertexBindings[0]
+		} else {
+			data.vertexInputState.vertexBindingDescriptionCount = 0
+			data.vertexInputState.pVertexBindingDescriptions = nil
+		}
+
+		// Vertex attribute descriptions
+		if len(info.VertexInputState.VertexAttributeDescriptions) > 0 {
+			data.vertexAttributes = make([]C.VkVertexInputAttributeDescription, len(info.VertexInputState.VertexAttributeDescriptions))
+			for i, attr := range info.VertexInputState.VertexAttributeDescriptions {
+				data.vertexAttributes[i].location = C.uint32_t(attr.Location)
+				data.vertexAttributes[i].binding = C.uint32_t(attr.Binding)
+				data.vertexAttributes[i].format = C.VkFormat(attr.Format)
+				data.vertexAttributes[i].offset = C.uint32_t(attr.Offset)
+			}
+			data.vertexInputState.vertexAttributeDescriptionCount = C.uint32_t(len(data.vertexAttributes))
+			data.vertexInputState.pVertexAttributeDescriptions = &data.vertexAttributes[0]
+		} else {
+			data.vertexInputState.vertexAttributeDescriptionCount = 0
+			data.vertexInputState.pVertexAttributeDescriptions = nil
+		}
+
 		data.cInfo.pVertexInputState = data.vertexInputState
 	}
 
@@ -309,4 +355,43 @@ func (device Device) CreateGraphicsPipeline(createInfo *GraphicsPipelineCreateIn
 	}
 
 	return Pipeline{handle: pipeline}, nil
+}
+
+// Update the vulkanize function for PipelineLayoutCreateInfo:
+func (info *PipelineLayoutCreateInfo) vulkanize() *pipelineLayoutCreateData {
+	data := &pipelineLayoutCreateData{}
+
+	data.cInfo = (*C.VkPipelineLayoutCreateInfo)(C.calloc(1, C.sizeof_VkPipelineLayoutCreateInfo))
+	data.cInfo.sType = C.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+	data.cInfo.pNext = nil
+	data.cInfo.flags = 0
+
+	// Descriptor set layouts
+	if len(info.SetLayouts) > 0 {
+		data.setLayouts = make([]C.VkDescriptorSetLayout, len(info.SetLayouts))
+		for i, layout := range info.SetLayouts {
+			data.setLayouts[i] = layout.handle
+		}
+		data.cInfo.setLayoutCount = C.uint32_t(len(data.setLayouts))
+		data.cInfo.pSetLayouts = &data.setLayouts[0]
+	} else {
+		data.cInfo.setLayoutCount = 0
+		data.cInfo.pSetLayouts = nil
+	}
+
+	data.cInfo.pushConstantRangeCount = 0
+	data.cInfo.pPushConstantRanges = nil
+
+	return data
+}
+
+type pipelineLayoutCreateData struct {
+	cInfo      *C.VkPipelineLayoutCreateInfo
+	setLayouts []C.VkDescriptorSetLayout
+}
+
+func (data *pipelineLayoutCreateData) free() {
+	if data.cInfo != nil {
+		C.free(unsafe.Pointer(data.cInfo))
+	}
 }

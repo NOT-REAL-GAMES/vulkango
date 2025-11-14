@@ -1376,6 +1376,9 @@ const (
 	// Image usage
 	IMAGE_USAGE_COLOR_ATTACHMENT_BIT ImageUsageFlags = C.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
 	IMAGE_USAGE_TRANSFER_DST_BIT     ImageUsageFlags = C.VK_IMAGE_USAGE_TRANSFER_DST_BIT
+	IMAGE_USAGE_SAMPLED_BIT          ImageUsageFlags = C.VK_IMAGE_USAGE_SAMPLED_BIT
+	IMAGE_USAGE_STORAGE_BIT          ImageUsageFlags = C.VK_IMAGE_USAGE_STORAGE_BIT
+	IMAGE_USAGE_TRANSFER_SRC_BIT     ImageUsageFlags = C.VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 
 	// Composite alpha
 	COMPOSITE_ALPHA_OPAQUE_BIT_KHR CompositeAlphaFlagsKHR = C.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
@@ -1537,7 +1540,8 @@ type PipelineShaderStageCreateInfo struct {
 }
 
 type PipelineVertexInputStateCreateInfo struct {
-	// Empty for now - vertices hardcoded in shader
+	VertexBindingDescriptions   []VertexInputBindingDescription
+	VertexAttributeDescriptions []VertexInputAttributeDescription
 }
 
 type PipelineInputAssemblyStateCreateInfo struct {
@@ -1664,3 +1668,31 @@ type PipelineRenderingCreateInfo struct {
 type PhysicalDeviceVulkan13Features struct {
 	DynamicRendering bool
 }
+
+type VertexInputBindingDescription struct {
+	Binding   uint32
+	Stride    uint32
+	InputRate VertexInputRate
+}
+
+type VertexInputRate int32
+
+const (
+	VERTEX_INPUT_RATE_VERTEX   VertexInputRate = C.VK_VERTEX_INPUT_RATE_VERTEX
+	VERTEX_INPUT_RATE_INSTANCE VertexInputRate = C.VK_VERTEX_INPUT_RATE_INSTANCE
+)
+
+type VertexInputAttributeDescription struct {
+	Location uint32
+	Binding  uint32
+	Format   Format
+	Offset   uint32
+}
+
+// Add these format constants if not present:
+const (
+	FORMAT_R32G32_SFLOAT       Format = C.VK_FORMAT_R32G32_SFLOAT       // vec2
+	FORMAT_R32G32B32_SFLOAT    Format = C.VK_FORMAT_R32G32B32_SFLOAT    // vec3
+	FORMAT_R32G32B32A32_SFLOAT Format = C.VK_FORMAT_R32G32B32A32_SFLOAT // vec4
+	FORMAT_R8G8B8A8_SRGB       Format = C.VK_FORMAT_R8G8B8A8_SRGB
+)
