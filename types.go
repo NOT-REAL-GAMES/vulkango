@@ -1310,3 +1310,357 @@ func ApiVersionMinor(version uint32) uint32 {
 func ApiVersionPatch(version uint32) uint32 {
 	return version & 0xFFF
 }
+
+type SurfaceKHR struct {
+	handle C.VkSurfaceKHR
+}
+
+type SwapchainKHR struct {
+	handle C.VkSwapchainKHR
+}
+
+type Image struct {
+	handle C.VkImage
+}
+
+type ImageView struct {
+	handle C.VkImageView
+}
+
+// Swapchain support structures
+type SurfaceFormatKHR struct {
+	Format     Format
+	ColorSpace ColorSpaceKHR
+}
+
+type SurfaceCapabilitiesKHR struct {
+	MinImageCount           uint32
+	MaxImageCount           uint32
+	CurrentExtent           Extent2D
+	MinImageExtent          Extent2D
+	MaxImageExtent          Extent2D
+	MaxImageArrayLayers     uint32
+	SupportedTransforms     SurfaceTransformFlagsKHR
+	CurrentTransform        SurfaceTransformFlagsKHR
+	SupportedCompositeAlpha CompositeAlphaFlagsKHR
+	SupportedUsageFlags     ImageUsageFlags
+}
+
+type Extent2D struct {
+	Width  uint32
+	Height uint32
+}
+
+// Enums and flags
+type Format int32
+type ColorSpaceKHR int32
+type PresentModeKHR int32
+type SurfaceTransformFlagsKHR uint32
+type CompositeAlphaFlagsKHR uint32
+type ImageUsageFlags uint32
+
+const (
+	// Common formats
+	FORMAT_B8G8R8A8_SRGB  Format = C.VK_FORMAT_B8G8R8A8_SRGB
+	FORMAT_B8G8R8A8_UNORM Format = C.VK_FORMAT_B8G8R8A8_UNORM
+
+	// Color spaces
+	COLOR_SPACE_SRGB_NONLINEAR_KHR ColorSpaceKHR = C.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+
+	// Present modes
+	PRESENT_MODE_IMMEDIATE_KHR    PresentModeKHR = C.VK_PRESENT_MODE_IMMEDIATE_KHR
+	PRESENT_MODE_MAILBOX_KHR      PresentModeKHR = C.VK_PRESENT_MODE_MAILBOX_KHR
+	PRESENT_MODE_FIFO_KHR         PresentModeKHR = C.VK_PRESENT_MODE_FIFO_KHR
+	PRESENT_MODE_FIFO_RELAXED_KHR PresentModeKHR = C.VK_PRESENT_MODE_FIFO_RELAXED_KHR
+
+	// Image usage
+	IMAGE_USAGE_COLOR_ATTACHMENT_BIT ImageUsageFlags = C.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+	IMAGE_USAGE_TRANSFER_DST_BIT     ImageUsageFlags = C.VK_IMAGE_USAGE_TRANSFER_DST_BIT
+
+	// Composite alpha
+	COMPOSITE_ALPHA_OPAQUE_BIT_KHR CompositeAlphaFlagsKHR = C.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+
+	// Surface transform
+	SURFACE_TRANSFORM_IDENTITY_BIT_KHR SurfaceTransformFlagsKHR = C.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+)
+
+// Device type
+type Device struct {
+	handle C.VkDevice
+}
+
+type Queue struct {
+	handle C.VkQueue
+}
+
+// Queue family and device types
+type QueueFamilyProperties struct {
+	QueueFlags                  QueueFlags
+	QueueCount                  uint32
+	TimestampValidBits          uint32
+	MinImageTransferGranularity Extent3D
+}
+
+type Extent3D struct {
+	Width  uint32
+	Height uint32
+	Depth  uint32
+}
+
+type QueueFlags uint32
+
+const (
+	QUEUE_GRAPHICS_BIT       QueueFlags = C.VK_QUEUE_GRAPHICS_BIT
+	QUEUE_COMPUTE_BIT        QueueFlags = C.VK_QUEUE_COMPUTE_BIT
+	QUEUE_TRANSFER_BIT       QueueFlags = C.VK_QUEUE_TRANSFER_BIT
+	QUEUE_SPARSE_BINDING_BIT QueueFlags = C.VK_QUEUE_SPARSE_BINDING_BIT
+)
+
+type DeviceQueueCreateInfo struct {
+	QueueFamilyIndex uint32
+	QueuePriorities  []float32
+}
+
+type DeviceCreateInfo struct {
+	QueueCreateInfos      []DeviceQueueCreateInfo
+	EnabledLayerNames     []string
+	EnabledExtensionNames []string
+	Vulkan13Features      *PhysicalDeviceVulkan13Features
+}
+
+type PhysicalDeviceFeatures struct {
+	// We'll leave this empty for now - can add fields as needed
+}
+
+// Image view types
+type ImageViewCreateInfo struct {
+	Image            Image
+	ViewType         ImageViewType
+	Format           Format
+	Components       ComponentMapping
+	SubresourceRange ImageSubresourceRange
+}
+
+type ImageViewType int32
+type ComponentSwizzle int32
+
+const (
+	IMAGE_VIEW_TYPE_1D         ImageViewType = C.VK_IMAGE_VIEW_TYPE_1D
+	IMAGE_VIEW_TYPE_2D         ImageViewType = C.VK_IMAGE_VIEW_TYPE_2D
+	IMAGE_VIEW_TYPE_3D         ImageViewType = C.VK_IMAGE_VIEW_TYPE_3D
+	IMAGE_VIEW_TYPE_CUBE       ImageViewType = C.VK_IMAGE_VIEW_TYPE_CUBE
+	IMAGE_VIEW_TYPE_1D_ARRAY   ImageViewType = C.VK_IMAGE_VIEW_TYPE_1D_ARRAY
+	IMAGE_VIEW_TYPE_2D_ARRAY   ImageViewType = C.VK_IMAGE_VIEW_TYPE_2D_ARRAY
+	IMAGE_VIEW_TYPE_CUBE_ARRAY ImageViewType = C.VK_IMAGE_VIEW_TYPE_CUBE_ARRAY
+
+	COMPONENT_SWIZZLE_IDENTITY ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_IDENTITY
+	COMPONENT_SWIZZLE_ZERO     ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_ZERO
+	COMPONENT_SWIZZLE_ONE      ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_ONE
+	COMPONENT_SWIZZLE_R        ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_R
+	COMPONENT_SWIZZLE_G        ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_G
+	COMPONENT_SWIZZLE_B        ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_B
+	COMPONENT_SWIZZLE_A        ComponentSwizzle = C.VK_COMPONENT_SWIZZLE_A
+)
+
+type ComponentMapping struct {
+	R ComponentSwizzle
+	G ComponentSwizzle
+	B ComponentSwizzle
+	A ComponentSwizzle
+}
+
+type ImageSubresourceRange struct {
+	AspectMask     ImageAspectFlags
+	BaseMipLevel   uint32
+	LevelCount     uint32
+	BaseArrayLayer uint32
+	LayerCount     uint32
+}
+
+type ImageAspectFlags uint32
+
+const (
+	IMAGE_ASPECT_COLOR_BIT   ImageAspectFlags = C.VK_IMAGE_ASPECT_COLOR_BIT
+	IMAGE_ASPECT_DEPTH_BIT   ImageAspectFlags = C.VK_IMAGE_ASPECT_DEPTH_BIT
+	IMAGE_ASPECT_STENCIL_BIT ImageAspectFlags = C.VK_IMAGE_ASPECT_STENCIL_BIT
+)
+
+type PipelineLayout struct {
+	handle C.VkPipelineLayout
+}
+
+type Pipeline struct {
+	handle C.VkPipeline
+}
+
+type PipelineLayoutCreateInfo struct {
+	SetLayouts         []DescriptorSetLayout
+	PushConstantRanges []PushConstantRange
+}
+
+type DescriptorSetLayout struct {
+	handle C.VkDescriptorSetLayout
+}
+
+type PushConstantRange struct {
+	StageFlags ShaderStageFlags
+	Offset     uint32
+	Size       uint32
+}
+
+type ShaderStageFlags uint32
+
+const (
+	SHADER_STAGE_VERTEX_BIT   ShaderStageFlags = C.VK_SHADER_STAGE_VERTEX_BIT
+	SHADER_STAGE_FRAGMENT_BIT ShaderStageFlags = C.VK_SHADER_STAGE_FRAGMENT_BIT
+	SHADER_STAGE_COMPUTE_BIT  ShaderStageFlags = C.VK_SHADER_STAGE_COMPUTE_BIT
+	SHADER_STAGE_ALL_GRAPHICS ShaderStageFlags = C.VK_SHADER_STAGE_ALL_GRAPHICS
+)
+
+type GraphicsPipelineCreateInfo struct {
+	Stages             []PipelineShaderStageCreateInfo
+	VertexInputState   *PipelineVertexInputStateCreateInfo
+	InputAssemblyState *PipelineInputAssemblyStateCreateInfo
+	ViewportState      *PipelineViewportStateCreateInfo
+	RasterizationState *PipelineRasterizationStateCreateInfo
+	MultisampleState   *PipelineMultisampleStateCreateInfo
+	ColorBlendState    *PipelineColorBlendStateCreateInfo
+	DynamicState       *PipelineDynamicStateCreateInfo
+	Layout             PipelineLayout
+	RenderingInfo      *PipelineRenderingCreateInfo
+}
+
+type PipelineShaderStageCreateInfo struct {
+	Stage  ShaderStageFlags
+	Module ShaderModule
+	Name   string
+}
+
+type PipelineVertexInputStateCreateInfo struct {
+	// Empty for now - vertices hardcoded in shader
+}
+
+type PipelineInputAssemblyStateCreateInfo struct {
+	Topology               PrimitiveTopology
+	PrimitiveRestartEnable bool
+}
+
+type PrimitiveTopology int32
+
+const (
+	PRIMITIVE_TOPOLOGY_POINT_LIST    PrimitiveTopology = C.VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+	PRIMITIVE_TOPOLOGY_LINE_LIST     PrimitiveTopology = C.VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+	PRIMITIVE_TOPOLOGY_TRIANGLE_LIST PrimitiveTopology = C.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+)
+
+type PipelineViewportStateCreateInfo struct {
+	Viewports []Viewport
+	Scissors  []Rect2D
+}
+
+type Viewport struct {
+	X        float32
+	Y        float32
+	Width    float32
+	Height   float32
+	MinDepth float32
+	MaxDepth float32
+}
+
+type Rect2D struct {
+	Offset Offset2D
+	Extent Extent2D
+}
+
+type Offset2D struct {
+	X int32
+	Y int32
+}
+
+type PipelineRasterizationStateCreateInfo struct {
+	DepthClampEnable        bool
+	RasterizerDiscardEnable bool
+	PolygonMode             PolygonMode
+	CullMode                CullModeFlags
+	FrontFace               FrontFace
+	DepthBiasEnable         bool
+	LineWidth               float32
+}
+
+type PolygonMode int32
+type CullModeFlags uint32
+type FrontFace int32
+
+const (
+	POLYGON_MODE_FILL            PolygonMode   = C.VK_POLYGON_MODE_FILL
+	POLYGON_MODE_LINE            PolygonMode   = C.VK_POLYGON_MODE_LINE
+	POLYGON_MODE_POINT           PolygonMode   = C.VK_POLYGON_MODE_POINT
+	CULL_MODE_NONE               CullModeFlags = 0
+	CULL_MODE_FRONT_BIT          CullModeFlags = C.VK_CULL_MODE_FRONT_BIT
+	CULL_MODE_BACK_BIT           CullModeFlags = C.VK_CULL_MODE_BACK_BIT
+	FRONT_FACE_COUNTER_CLOCKWISE FrontFace     = C.VK_FRONT_FACE_COUNTER_CLOCKWISE
+	FRONT_FACE_CLOCKWISE         FrontFace     = C.VK_FRONT_FACE_CLOCKWISE
+)
+
+type PipelineMultisampleStateCreateInfo struct {
+	RasterizationSamples SampleCountFlags
+	SampleShadingEnable  bool
+}
+
+type SampleCountFlags int32
+
+const (
+	SAMPLE_COUNT_1_BIT SampleCountFlags = C.VK_SAMPLE_COUNT_1_BIT
+	SAMPLE_COUNT_2_BIT SampleCountFlags = C.VK_SAMPLE_COUNT_2_BIT
+	SAMPLE_COUNT_4_BIT SampleCountFlags = C.VK_SAMPLE_COUNT_4_BIT
+	SAMPLE_COUNT_8_BIT SampleCountFlags = C.VK_SAMPLE_COUNT_8_BIT
+)
+
+type PipelineColorBlendStateCreateInfo struct {
+	LogicOpEnable bool
+	LogicOp       LogicOp
+	Attachments   []PipelineColorBlendAttachmentState
+}
+
+type LogicOp int32
+
+const (
+	LOGIC_OP_COPY LogicOp = C.VK_LOGIC_OP_COPY
+)
+
+type PipelineColorBlendAttachmentState struct {
+	BlendEnable    bool
+	ColorWriteMask ColorComponentFlags
+}
+
+type ColorComponentFlags uint32
+
+const (
+	COLOR_COMPONENT_R_BIT ColorComponentFlags = C.VK_COLOR_COMPONENT_R_BIT
+	COLOR_COMPONENT_G_BIT ColorComponentFlags = C.VK_COLOR_COMPONENT_G_BIT
+	COLOR_COMPONENT_B_BIT ColorComponentFlags = C.VK_COLOR_COMPONENT_B_BIT
+	COLOR_COMPONENT_A_BIT ColorComponentFlags = C.VK_COLOR_COMPONENT_A_BIT
+	COLOR_COMPONENT_ALL   ColorComponentFlags = COLOR_COMPONENT_R_BIT | COLOR_COMPONENT_G_BIT | COLOR_COMPONENT_B_BIT | COLOR_COMPONENT_A_BIT
+)
+
+type PipelineDynamicStateCreateInfo struct {
+	DynamicStates []DynamicState
+}
+
+type DynamicState int32
+
+const (
+	DYNAMIC_STATE_VIEWPORT DynamicState = C.VK_DYNAMIC_STATE_VIEWPORT
+	DYNAMIC_STATE_SCISSOR  DynamicState = C.VK_DYNAMIC_STATE_SCISSOR
+)
+
+type PipelineRenderingCreateInfo struct {
+	ViewMask                uint32
+	ColorAttachmentFormats  []Format
+	DepthAttachmentFormat   Format
+	StencilAttachmentFormat Format
+}
+
+type PhysicalDeviceVulkan13Features struct {
+	DynamicRendering bool
+}
