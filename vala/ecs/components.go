@@ -99,3 +99,25 @@ type BufferData struct {
 	IndexCount         uint32          // Number of indices
 	VertexCount        uint32          // Number of vertices
 }
+
+// Text component holds text rendering data.
+// For rendering debug overlays, UI labels, etc.
+type Text struct {
+	Content  string    // The text string to display
+	X, Y     float32   // Screen position in pixels
+	FontSize float32   // Font size in pixels
+	Color    [4]float32 // Text color (RGBA, 0-1 range)
+	Visible  bool      // Whether the text is visible
+}
+
+// NewText creates a default Text component with white color
+func NewText(content string, x, y, fontSize float32) *Text {
+	return &Text{
+		Content:  content,
+		X:        x,
+		Y:        y,
+		FontSize: fontSize,
+		Color:    [4]float32{1.0, 1.0, 1.0, 1.0}, // White
+		Visible:  true,
+	}
+}

@@ -19,6 +19,7 @@ type World struct {
 	vulkanPipelines map[Entity]*VulkanPipeline
 	blendModes      map[Entity]*BlendMode
 	textureData     map[Entity]*TextureData
+	texts           map[Entity]*Text
 
 	// Track all living entities for iteration
 	entities map[Entity]bool
@@ -33,6 +34,7 @@ func NewWorld() *World {
 		vulkanPipelines: make(map[Entity]*VulkanPipeline),
 		blendModes:      make(map[Entity]*BlendMode),
 		textureData:     make(map[Entity]*TextureData),
+		texts:           make(map[Entity]*Text),
 		entities:        make(map[Entity]bool),
 	}
 }
@@ -198,4 +200,23 @@ func (w *World) RemoveTextureData(entity Entity) {
 func (w *World) HasTextureData(entity Entity) bool {
 	_, exists := w.textureData[entity]
 	return exists
+}
+
+// ===== Text Component =====
+
+func (w *World) AddText(e Entity, t *Text) {
+	w.texts[e] = t
+}
+
+func (w *World) GetText(e Entity) *Text {
+	return w.texts[e]
+}
+
+func (w *World) HasText(e Entity) bool {
+	_, exists := w.texts[e]
+	return exists
+}
+
+func (w *World) RemoveText(e Entity) {
+	delete(w.texts, e)
 }

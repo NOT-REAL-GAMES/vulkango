@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/draw"
 	_ "image/jpeg" // Register JPEG decoder
-	_ "image/png"  // Register PNG decoder
 	"math"
 	"os"
 	"runtime"
@@ -17,6 +16,7 @@ import (
 	shaderc "github.com/NOT-REAL-GAMES/vulkango/shaderc"
 
 	"github.com/NOT-REAL-GAMES/vala/ecs"
+	fontpkg "github.com/NOT-REAL-GAMES/vala/font"
 	"github.com/NOT-REAL-GAMES/vala/systems"
 )
 
@@ -596,6 +596,7 @@ func main() {
 
 		fmt.Println("Composite pipeline created!")
 
+		// === Text Rendering Setup ===
 		// Quad vertices (2 triangles)
 		vertices := []Vertex{
 			{Pos: [2]float32{-0.5, -0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 0.0}}, // Bottom-left
@@ -667,15 +668,15 @@ func main() {
 		}
 
 		textureWidth := imageData.Width
-		textureHeight := imageData.Height
+		atlasHeight := imageData.Height
 		textureData := imageData.Pixels
-		textureSize := uint64(len(textureData))
+		atlasSize := uint64(len(textureData))
 
-		fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, textureHeight, textureSize)
+		fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, atlasHeight, atlasSize)
 
 		// Create staging buffer
 		stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(
-			textureSize,
+			atlasSize,
 			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
 			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
 			physicalDevice,
@@ -692,7 +693,7 @@ func main() {
 
 		// Create texture image
 		textureImage, textureMemory, err := device.CreateImageWithMemory(
-			textureWidth, textureHeight,
+			textureWidth, atlasHeight,
 			vk.FORMAT_R8G8B8A8_SRGB,
 			vk.IMAGE_TILING_OPTIMAL,
 			vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
@@ -759,7 +760,7 @@ func main() {
 					LayerCount:     1,
 				},
 				ImageOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
-				ImageExtent: vk.Extent3D{Width: textureWidth, Height: textureHeight, Depth: 1},
+				ImageExtent: vk.Extent3D{Width: textureWidth, Height: atlasHeight, Depth: 1},
 			},
 		})
 
@@ -824,6 +825,368 @@ func main() {
 		defer device.DestroySampler(textureSampler)
 
 		fmt.Println("Texture created!")
+		fmt.Println("Setting up SDF text rendering...")
+
+		// Load embedded font
+		fontData, err := fontpkg.LoadEmbeddedFont()
+		if err != nil {
+			panic(fmt.Sprintf("Failed to load font: %v", err))
+		}
+
+		// Generate SDF atlas (32 pixel font, 8 pixel padding, edge at 128, 32 pixel distance scale for more contrast)
+		sdfAtlas, err := fontpkg.GenerateSDFAtlas(fontData, 32.0, 8, 128, 32.0)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to generate SDF atlas: %v", err))
+		}
+		fmt.Printf("Generated SDF atlas: %dx%d with %d characters\n",
+			sdfAtlas.Width, sdfAtlas.Height, len(sdfAtlas.Chars))
+
+		// Upload SDF atlas to GPU
+		textAtlasW := uint32(sdfAtlas.Width)
+		textAtlasH := uint32(sdfAtlas.Height)
+		textAtlasBytes := uint64(len(sdfAtlas.Pixels))
+
+		// Create staging buffer for atlas
+		textAtlasStaging, textAtlasStagingMemory, err := device.CreateBufferWithMemory(
+			textAtlasBytes,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textAtlasStaging)
+		defer device.FreeMemory(textAtlasStagingMemory)
+
+		// Upload atlas data to staging buffer
+		err = device.UploadToBuffer(textAtlasStagingMemory, sdfAtlas.Pixels)
+		if err != nil {
+			panic(err)
+		}
+
+		// Create atlas texture image (R8 format for single-channel SDF)
+		textAtlasImage, textAtlasMemory, err := device.CreateImageWithMemory(
+			textAtlasW,
+			textAtlasH,
+			vk.FORMAT_R8_UNORM,
+			vk.IMAGE_TILING_OPTIMAL,
+			vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyImage(textAtlasImage)
+		defer device.FreeMemory(textAtlasMemory)
+
+		// Create image view for atlas
+		textAtlasImageView, err := device.CreateImageViewForTexture(textAtlasImage, vk.FORMAT_R8_UNORM)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyImageView(textAtlasImageView)
+
+		// Create sampler for text atlas
+		textAtlasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
+			MagFilter:    vk.FILTER_LINEAR,
+			MinFilter:    vk.FILTER_LINEAR,
+			AddressModeU: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeV: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeW: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroySampler(textAtlasSampler)
+
+		// Create command buffer for atlas upload
+		atlasUploadCmdBuffer, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+			CommandPool:        commandPool,
+			Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+			CommandBufferCount: 1,
+		})
+		if err != nil {
+			panic(err)
+		}
+		atlasUploadCmd := atlasUploadCmdBuffer[0]
+
+		// Record upload commands
+		atlasUploadCmd.Begin(&vk.CommandBufferBeginInfo{
+			Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+		})
+
+		// Transition image to transfer dst
+		atlasUploadCmd.PipelineBarrier(
+			vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			vk.PIPELINE_STAGE_TRANSFER_BIT,
+			0,
+			[]vk.ImageMemoryBarrier{
+				{
+					SrcAccessMask:       vk.ACCESS_NONE,
+					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               textAtlasImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
+			},
+		)
+
+		// Copy buffer to image
+		atlasUploadCmd.CopyBufferToImage(textAtlasStaging, textAtlasImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, []vk.BufferImageCopy{
+			{
+				BufferOffset:      0,
+				BufferRowLength:   0,
+				BufferImageHeight: 0,
+				ImageSubresource: vk.ImageSubresourceLayers{
+					AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+					MipLevel:       0,
+					BaseArrayLayer: 0,
+					LayerCount:     1,
+				},
+				ImageOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+				ImageExtent: vk.Extent3D{Width: textAtlasW, Height: textAtlasH, Depth: 1},
+			},
+		})
+
+		// Transition image to shader read
+		atlasUploadCmd.PipelineBarrier(
+			vk.PIPELINE_STAGE_TRANSFER_BIT,
+			vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0,
+			[]vk.ImageMemoryBarrier{
+				{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               textAtlasImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
+			},
+		)
+
+		atlasUploadCmd.End()
+
+		// Submit and wait
+		err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{atlasUploadCmd}}}, vk.Fence{})
+		if err != nil {
+			panic(fmt.Sprintf("Atlas upload submit failed: %v", err))
+		}
+		queue.WaitIdle()
+
+		fmt.Println("SDF atlas uploaded to GPU!")
+
+		// === Text Rendering Pipeline ===
+		fmt.Println("Creating text rendering pipeline...")
+
+		// Compile SDF shaders
+		textVertResult, err := compiler.CompileIntoSPV(fontpkg.SDFVertexShader, "text.vert", shaderc.VertexShader, options)
+		defer textVertResult.Release()
+		if err != nil {
+			panic(fmt.Sprintf("Text vertex shader compilation failed: %v", err))
+		}
+		textVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: textVertResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(textVertShader)
+
+		textFragResult, err := compiler.CompileIntoSPV(fontpkg.SDFFragmentShader, "text.frag", shaderc.FragmentShader, options)
+		defer textFragResult.Release()
+		if err != nil {
+			panic(fmt.Sprintf("Text fragment shader compilation failed: %v", err))
+		}
+		textFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: textFragResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(textFragShader)
+
+		// Create descriptor set layout for text (binding 0: sampler2D)
+		textDescriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Bindings: []vk.DescriptorSetLayoutBinding{
+				{
+					Binding:         0,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: 1,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorSetLayout(textDescriptorSetLayout)
+
+		// Create text pipeline layout (with push constants for screen size and color)
+		textPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			SetLayouts: []vk.DescriptorSetLayout{textDescriptorSetLayout},
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT,
+					Offset:     0,
+					Size:       32, // vec2 screenSize (8) + padding (8) + vec4 textColor (16) = 32 bytes (std140)
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipelineLayout(textPipelineLayout)
+
+		// Create text rendering pipeline
+		textPipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
+			Stages: []vk.PipelineShaderStageCreateInfo{
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: textVertShader, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: textFragShader, Name: "main"},
+			},
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{
+						Binding:   0,
+						Stride:    16, // 2 floats (pos) + 2 floats (uv) = 16 bytes
+						InputRate: vk.VERTEX_INPUT_RATE_VERTEX,
+					},
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{Location: 0, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 0}, // position
+					{Location: 1, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 8}, // texCoord
+				},
+			},
+			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			},
+			ViewportState: &vk.PipelineViewportStateCreateInfo{
+				Viewports: []vk.Viewport{{}}, // Dynamic, but must specify count
+				Scissors:  []vk.Rect2D{{}},   // Dynamic, but must specify count
+			},
+			RasterizationState: &vk.PipelineRasterizationStateCreateInfo{
+				PolygonMode: vk.POLYGON_MODE_FILL,
+				CullMode:    vk.CULL_MODE_NONE,
+				FrontFace:   vk.FRONT_FACE_CLOCKWISE,
+				LineWidth:   1.0,
+			},
+			MultisampleState: &vk.PipelineMultisampleStateCreateInfo{
+				RasterizationSamples: vk.SAMPLE_COUNT_1_BIT,
+			},
+			ColorBlendState: &vk.PipelineColorBlendStateCreateInfo{
+				Attachments: []vk.PipelineColorBlendAttachmentState{
+					{
+						BlendEnable:         true,
+						SrcColorBlendFactor: vk.BLEND_FACTOR_SRC_ALPHA,
+						DstColorBlendFactor: vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+						ColorBlendOp:        vk.BLEND_OP_ADD,
+						SrcAlphaBlendFactor: vk.BLEND_FACTOR_ONE,
+						DstAlphaBlendFactor: vk.BLEND_FACTOR_ZERO,
+						AlphaBlendOp:        vk.BLEND_OP_ADD,
+						ColorWriteMask:      vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT,
+					},
+				},
+			},
+			DynamicState: &vk.PipelineDynamicStateCreateInfo{
+				DynamicStates: []vk.DynamicState{
+					vk.DYNAMIC_STATE_VIEWPORT,
+					vk.DYNAMIC_STATE_SCISSOR,
+				},
+			},
+			Layout: textPipelineLayout,
+		RenderingInfo: &vk.PipelineRenderingCreateInfo{
+			ColorAttachmentFormats: []vk.Format{swapFormat},
+		},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create text pipeline: %v", err))
+		}
+		defer device.DestroyPipeline(textPipeline)
+
+		// Create descriptor pool for text
+		textDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			MaxSets: 1,
+			PoolSizes: []vk.DescriptorPoolSize{
+				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: 1},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorPool(textDescriptorPool)
+
+		// Allocate descriptor set for text atlas
+		textDescriptorSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+			DescriptorPool: textDescriptorPool,
+			SetLayouts:     []vk.DescriptorSetLayout{textDescriptorSetLayout},
+		})
+		if err != nil {
+			panic(err)
+		}
+		textDescriptorSet := textDescriptorSets[0]
+
+		// Update descriptor set with SDF atlas texture
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          textDescriptorSet,
+				DstBinding:      0,
+				DstArrayElement: 0,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{
+					{
+						Sampler:     textAtlasSampler,
+						ImageView:   textAtlasImageView,
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					},
+				},
+			},
+		})
+
+		fmt.Println("Text rendering pipeline created!")
+
+		// Create vertex/index buffers for text (sized for ~100 characters = 400 vertices, 600 indices)
+		maxTextChars := 100
+		textVertexBufferSize := uint64(maxTextChars * 4 * 16) // 4 verts * 16 bytes per vertex
+		textIndexBufferSize := uint64(maxTextChars * 6 * 2)   // 6 indices * 2 bytes per index
+
+		textVertexBuffer, textVertexMemory, err := device.CreateBufferWithMemory(
+			textVertexBufferSize,
+			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textVertexBuffer)
+		defer device.FreeMemory(textVertexMemory)
+
+		textIndexBuffer, textIndexMemory, err := device.CreateBufferWithMemory(
+			textIndexBufferSize,
+			vk.BUFFER_USAGE_INDEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textIndexBuffer)
+		defer device.FreeMemory(textIndexMemory)
 
 		// Create descriptor set layout
 
@@ -1125,6 +1488,13 @@ func main() {
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
 
+		// Create "Hello World!" text entity
+		helloText := world.CreateEntity()
+		textComponent := ecs.NewText("Hello World!", 100.0, 100.0, 32.0)
+		textComponent.Color = [4]float32{1.0, 1.0, 1.0, 1.0} // White
+		world.AddText(helloText, textComponent)
+		fmt.Println("Created Hello World text entity")
+
 		// === Initial Image Layout Transitions ===
 		// Transition layer framebuffers from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
 		fmt.Println("Transitioning layer images to COLOR_ATTACHMENT_OPTIMAL...")
@@ -1382,6 +1752,101 @@ func main() {
 				}
 			}
 
+			// === Render Text Overlay ===
+			// Query all text entities
+			textEntities := world.QueryAll(func(e ecs.Entity) bool {
+				return world.HasText(e) && world.GetText(e).Visible
+			})
+
+			for _, entity := range textEntities {
+				textComp := world.GetText(entity)
+
+				// Generate text quads
+				vertices, indices := systems.GenerateTextQuads(textComp, sdfAtlas)
+				if len(vertices) == 0 {
+					continue
+				}
+
+				// Upload vertices
+				vertexData := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*16)
+				err = device.UploadToBuffer(textVertexMemory, vertexData)
+				if err != nil {
+					panic(fmt.Sprintf("Text vertex upload failed: %v", err))
+				}
+
+				// Upload indices
+				indexData := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*2)
+				err = device.UploadToBuffer(textIndexMemory, indexData)
+				if err != nil {
+					panic(fmt.Sprintf("Text index upload failed: %v", err))
+				}
+
+				// Bind text pipeline
+				cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
+
+				// Bind descriptor set (SDF atlas)
+				cmd.BindDescriptorSets(
+					vk.PIPELINE_BIND_POINT_GRAPHICS,
+					textPipelineLayout,
+					0,
+					[]vk.DescriptorSet{textDescriptorSet},
+					nil,
+				)
+
+				// Set viewport and scissor
+				cmd.SetViewport(0, []vk.Viewport{
+					{
+						X:        0,
+						Y:        0,
+						Width:    float32(swapExtent.Width),
+						Height:   float32(swapExtent.Height),
+						MinDepth: 0.0,
+						MaxDepth: 1.0,
+					},
+				})
+				cmd.SetScissor(0, []vk.Rect2D{
+					{
+						Offset: vk.Offset2D{X: 0, Y: 0},
+						Extent: swapExtent,
+					},
+				})
+
+				// Push constants (screen size and text color)
+				// NOTE: Must match std140 layout - vec4 aligned to 16 bytes
+				type TextPushConstants struct {
+					ScreenWidth  float32
+					ScreenHeight float32
+					_padding1    float32 // Padding for vec4 alignment
+					_padding2    float32 // Padding for vec4 alignment
+					ColorR       float32
+					ColorG       float32
+					ColorB       float32
+					ColorA       float32
+				}
+				pushData := TextPushConstants{
+					ScreenWidth:  float32(swapExtent.Width),
+					ScreenHeight: float32(swapExtent.Height),
+					ColorR:       textComp.Color[0],
+					ColorG:       textComp.Color[1],
+					ColorB:       textComp.Color[2],
+					ColorA:       textComp.Color[3],
+				}
+				cmd.CmdPushConstants(
+					textPipelineLayout,
+					vk.SHADER_STAGE_VERTEX_BIT,
+					0,
+					32, // 32 bytes: vec2 (8) + padding (8) + vec4 (16)
+					unsafe.Pointer(&pushData),
+				)
+
+				// Bind vertex and index buffers
+				cmd.BindVertexBuffers(0, []vk.Buffer{textVertexBuffer}, []uint64{0})
+				cmd.BindIndexBuffer(textIndexBuffer, 0, vk.INDEX_TYPE_UINT16)
+
+				// Draw text
+				cmd.DrawIndexed(uint32(len(indices)), 1, 0, 0, 0)
+			}
+
 			cmd.EndRendering()
 
 			// Transition swapchain: COLOR_ATTACHMENT → PRESENT
@@ -1433,7 +1898,7 @@ func main() {
 		}
 
 		// Wait for device to finish
-		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(10))
+		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 
 		time.Sleep(5 * time.Millisecond)
 	}
