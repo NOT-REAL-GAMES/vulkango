@@ -469,21 +469,21 @@ func main() {
 		fmt.Println("Creating composite pipeline...")
 
 		// Compile composite shaders
-		compositeVertResult, err := compiler.CompileIntoSPV(compositeVertexShader, "composite.vert", shaderc.VertexShader, options)
+		compositeVertModule, err := shaderc.CompileGLSL(compositeVertexShader, shaderc.VERTEX_SHADER, "composite.vert")
 		if err != nil {
 			panic(fmt.Sprintf("Composite vertex shader compilation failed: %v", err))
 		}
-		compositeVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: compositeVertResult.GetBytes()})
+		compositeVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: compositeVertModule})
 		if err != nil {
 			panic(err)
 		}
 		defer device.DestroyShaderModule(compositeVertShader)
 
-		compositeFragResult, err := compiler.CompileIntoSPV(compositeFragmentShader, "composite.frag", shaderc.FragmentShader, options)
+		compositeFragModule, err := shaderc.CompileGLSL(compositeFragmentShader, shaderc.FRAGMENT_SHADER, "composite.frag")
 		if err != nil {
 			panic(fmt.Sprintf("Composite fragment shader compilation failed: %v", err))
 		}
-		compositeFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: compositeFragResult.GetBytes()})
+		compositeFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: compositeFragModule})
 		if err != nil {
 			panic(err)
 		}
@@ -944,11 +944,20 @@ func main() {
 
 		// Create framebuffer for layer 1
 		layer1Image, layer1ImageMemory, err := device.CreateImageWithMemory(
-			swapExtent.Width,
-			swapExtent.Height,
-			vk.FORMAT_R8G8B8A8_UNORM,
-			vk.IMAGE_TILING_OPTIMAL,
-			vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+			&vk.ImageCreateInfo{
+				ImageType: vk.IMAGE_TYPE_2D,
+				Format:    vk.FORMAT_R8G8B8A8_UNORM,
+				Extent: vk.Extent3D{
+					Width:  swapExtent.Width,
+					Height: swapExtent.Height,
+					Depth:  1,
+				},
+				MipLevels:   1,
+				ArrayLayers: 1,
+				Samples:     vk.SAMPLE_COUNT_1_BIT,
+				Tiling:      vk.IMAGE_TILING_OPTIMAL,
+				Usage:       vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.IMAGE_USAGE_SAMPLED_BIT,
+			},
 			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			physicalDevice,
 		)
@@ -1051,11 +1060,20 @@ func main() {
 
 		// Create framebuffer for layer 2
 		layer2Image, layer2ImageMemory, err := device.CreateImageWithMemory(
-			swapExtent.Width,
-			swapExtent.Height,
-			vk.FORMAT_R8G8B8A8_UNORM,
-			vk.IMAGE_TILING_OPTIMAL,
-			vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+			&vk.ImageCreateInfo{
+				ImageType: vk.IMAGE_TYPE_2D,
+				Format:    vk.FORMAT_R8G8B8A8_UNORM,
+				Extent: vk.Extent3D{
+					Width:  swapExtent.Width,
+					Height: swapExtent.Height,
+					Depth:  1,
+				},
+				MipLevels:   1,
+				ArrayLayers: 1,
+				Samples:     vk.SAMPLE_COUNT_1_BIT,
+				Tiling:      vk.IMAGE_TILING_OPTIMAL,
+				Usage:       vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.IMAGE_USAGE_SAMPLED_BIT,
+			},
 			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			physicalDevice,
 		)
@@ -1090,7 +1108,7 @@ func main() {
 			Format:      vk.FORMAT_R8G8B8A8_UNORM,
 			Width:       swapExtent.Width,
 			Height:      swapExtent.Height,
-		})
+
 		// Create composite descriptor set for layer 2
 		layer2CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
 			DescriptorPool: compositeDescriptorPool,
@@ -1121,14 +1139,16 @@ func main() {
 		// Update layer2's VulkanPipeline with composite descriptor set
 		layer2Pipeline := world.GetVulkanPipeline(layer2)
 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
+		})
 
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
 
+
 		// === Initial Image Layout Transitions ===
 		// Transition layer framebuffers from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
 		fmt.Println("Transitioning layer images to COLOR_ATTACHMENT_OPTIMAL...")
-
+		
 		transitionCmd := commandBuffers[0] // Reuse first command buffer for one-time setup
 		transitionCmd.Reset(0)
 		transitionCmd.Begin(&vk.CommandBufferBeginInfo{})
@@ -1201,15 +1221,15 @@ func main() {
 				}
 			}
 
-			// Animate layer2 in a circle
-			elapsed := float32(time.Since(startTime).Seconds())
-			layer2Transform := world.GetTransform(layer2)
-			radius := float32(0.5)
-			layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
-			layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 
+		// Animate layer2 in a circle
+		elapsed := float32(time.Since(startTime).Seconds())
+		layer2Transform := world.GetTransform(layer2)
+		radius := float32(0.5) // Radius of the circle in normalized coordinates
+		layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
+		layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 			// Wait for previous frame
-			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
+			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(10))
 			device.ResetFences([]vk.Fence{inFlightFence})
 
 			// Acquire next image
@@ -1218,197 +1238,29 @@ func main() {
 				panic(fmt.Sprintf("Acquire failed: %v", err))
 			}
 
-			// Get sorted layers
-			sortedLayers := world.QueryRenderablesSorted()
-
 			// Record command buffer
 			cmd := commandBuffers[imageIndex]
 			cmd.Reset(0)
 			cmd.Begin(&vk.CommandBufferBeginInfo{})
 
-			// ===  PASS 1: Render each layer to its framebuffer ===
-			for _, entity := range sortedLayers {
-				renderTarget := world.GetRenderTarget(entity)
-				if renderTarget == nil {
-					continue
-				}
+			// === ECS Rendering ===
+			// Begin frame (transitions image and begins rendering)
+			systems.BeginFrame(cmd, swapImages[imageIndex], swapImageViews[imageIndex], swapExtent)
 
-				// Transition layer image: SHADER_READ → COLOR_ATTACHMENT
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{
-						{
-							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-							DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-							OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-							NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-							SrcQueueFamilyIndex: ^uint32(0),
-							DstQueueFamilyIndex: ^uint32(0),
-							Image:               renderTarget.Image,
-							SubresourceRange: vk.ImageSubresourceRange{
-								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-								BaseMipLevel:   0,
-								LevelCount:     1,
-								BaseArrayLayer: 0,
-								LayerCount:     1,
-							},
-						},
-					},
-				)
-
-				// Begin rendering to layer framebuffer
-				cmd.BeginRendering(&vk.RenderingInfo{
-					RenderArea: vk.Rect2D{
-						Offset: vk.Offset2D{X: 0, Y: 0},
-						Extent: swapExtent,
-					},
-					LayerCount: 1,
-					ColorAttachments: []vk.RenderingAttachmentInfo{
-						{
-							ImageView:   renderTarget.ImageView,
-							ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-							LoadOp:      vk.ATTACHMENT_LOAD_OP_CLEAR,
-							StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
-							ClearValue: vk.ClearValue{
-								Color: vk.ClearColorValue{
-									Float32: [4]float32{0.0, 0.0, 0.0, 0.0}, // Transparent
-								},
-							},
-						},
-					},
-				})
-
-				// Render layer content
-				renderCtx := &systems.RenderContext{
-					CommandBuffer: cmd,
-					SwapExtent:    swapExtent,
-					VertexBuffer:  vertexBuffer,
-					IndexBuffer:   indexBuffer,
-					IndexCount:    uint32(len(indices)),
-				}
-				systems.RenderLayerContent(world, renderCtx, entity)
-
-				cmd.EndRendering()
-
-				// Transition layer image: COLOR_ATTACHMENT → SHADER_READ
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{
-						{
-							SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-							OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-							SrcQueueFamilyIndex: ^uint32(0),
-							DstQueueFamilyIndex: ^uint32(0),
-							Image:               renderTarget.Image,
-							SubresourceRange: vk.ImageSubresourceRange{
-								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-								BaseMipLevel:   0,
-								LevelCount:     1,
-								BaseArrayLayer: 0,
-								LayerCount:     1,
-							},
-						},
-					},
-				)
+			// Create render context for the frame
+			renderCtx := &systems.RenderContext{
+				CommandBuffer: cmd,
+				SwapExtent:    swapExtent,
+				VertexBuffer:  vertexBuffer,
+				IndexBuffer:   indexBuffer,
+				IndexCount:    uint32(len(indices)),
 			}
 
-			// === PASS 2: Composite layers to swapchain ===
+			// Render all layers via ECS
+			systems.RenderLayers(world, renderCtx)
 
-			// Transition swapchain: UNDEFINED → COLOR_ATTACHMENT
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-				vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{
-					{
-						SrcAccessMask:       vk.ACCESS_NONE,
-						DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
-						NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               swapImages[imageIndex],
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					},
-				},
-			)
-
-			// Begin rendering to swapchain
-			cmd.BeginRendering(&vk.RenderingInfo{
-				RenderArea: vk.Rect2D{
-					Offset: vk.Offset2D{X: 0, Y: 0},
-					Extent: swapExtent,
-				},
-				LayerCount: 1,
-				ColorAttachments: []vk.RenderingAttachmentInfo{
-					{
-						ImageView:   swapImageViews[imageIndex],
-						ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						LoadOp:      vk.ATTACHMENT_LOAD_OP_CLEAR,
-						StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
-						ClearValue: vk.ClearValue{
-							Color: vk.ClearColorValue{
-								Float32: [4]float32{0.0, 0.0, 0.0, 1.0}, // Black background
-							},
-						},
-					},
-				},
-			})
-
-			// Composite each layer
-			compositeCtx := &systems.CompositeContext{
-				CommandBuffer:           cmd,
-				CompositePipeline:       compositePipeline,
-				CompositePipelineLayout: compositePipelineLayout,
-				SwapExtent:              swapExtent,
-			}
-
-			for _, entity := range sortedLayers {
-				pipeline := world.GetVulkanPipeline(entity)
-				if pipeline != nil {
-					systems.CompositeLayer(compositeCtx, pipeline.CompositeDescriptorSet)
-				}
-			}
-
-			cmd.EndRendering()
-
-			// Transition swapchain: COLOR_ATTACHMENT → PRESENT
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-				vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{
-					{
-						SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-						DstAccessMask:       vk.ACCESS_NONE,
-						OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						NewLayout:           vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               swapImages[imageIndex],
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					},
-				},
-			)
-
+			// End frame (ends rendering and transitions to present)
+			systems.EndFrame(cmd, swapImages[imageIndex])
 			cmd.End()
 
 			// Submit command buffer

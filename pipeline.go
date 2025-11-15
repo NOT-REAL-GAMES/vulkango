@@ -252,6 +252,12 @@ func (info *GraphicsPipelineCreateInfo) vulkanize() *graphicsPipelineData {
 				} else {
 					data.colorBlendAttachments[i].blendEnable = C.VK_FALSE
 				}
+				data.colorBlendAttachments[i].srcColorBlendFactor = C.VkBlendFactor(att.SrcColorBlendFactor)
+				data.colorBlendAttachments[i].dstColorBlendFactor = C.VkBlendFactor(att.DstColorBlendFactor)
+				data.colorBlendAttachments[i].colorBlendOp = C.VkBlendOp(att.ColorBlendOp)
+				data.colorBlendAttachments[i].srcAlphaBlendFactor = C.VkBlendFactor(att.SrcAlphaBlendFactor)
+				data.colorBlendAttachments[i].dstAlphaBlendFactor = C.VkBlendFactor(att.DstAlphaBlendFactor)
+				data.colorBlendAttachments[i].alphaBlendOp = C.VkBlendOp(att.AlphaBlendOp)
 				data.colorBlendAttachments[i].colorWriteMask = C.VkColorComponentFlags(att.ColorWriteMask)
 			}
 			data.colorBlendState.attachmentCount = C.uint32_t(len(data.colorBlendAttachments))

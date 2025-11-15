@@ -332,6 +332,7 @@ const (
 
 	PIPELINE_STAGE_TOP_OF_PIPE_BIT             PipelineStageFlags = C.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
 	PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT PipelineStageFlags = C.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+	PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT          PipelineStageFlags = C.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
 )
 
 func (cmd CommandBuffer) PipelineBarrier(
@@ -497,5 +498,23 @@ func (cmd CommandBuffer) BindDescriptorSets(
 		pSets,
 		C.uint32_t(len(cOffsets)),
 		pOffsets,
+	)
+}
+
+// CmdPushConstants updates push constant values
+func (cmd CommandBuffer) CmdPushConstants(
+	layout PipelineLayout,
+	stageFlags ShaderStageFlags,
+	offset uint32,
+	size uint32,
+	pValues unsafe.Pointer,
+) {
+	C.vkCmdPushConstants(
+		cmd.handle,
+		layout.handle,
+		C.VkShaderStageFlags(stageFlags),
+		C.uint32_t(offset),
+		C.uint32_t(size),
+		pValues,
 	)
 }

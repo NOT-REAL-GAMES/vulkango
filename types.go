@@ -1632,9 +1632,44 @@ const (
 	LOGIC_OP_COPY LogicOp = C.VK_LOGIC_OP_COPY
 )
 
+type BlendFactor int32
+
+const (
+	BLEND_FACTOR_ZERO                     BlendFactor = C.VK_BLEND_FACTOR_ZERO
+	BLEND_FACTOR_ONE                      BlendFactor = C.VK_BLEND_FACTOR_ONE
+	BLEND_FACTOR_SRC_COLOR                BlendFactor = C.VK_BLEND_FACTOR_SRC_COLOR
+	BLEND_FACTOR_ONE_MINUS_SRC_COLOR      BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR
+	BLEND_FACTOR_DST_COLOR                BlendFactor = C.VK_BLEND_FACTOR_DST_COLOR
+	BLEND_FACTOR_ONE_MINUS_DST_COLOR      BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR
+	BLEND_FACTOR_SRC_ALPHA                BlendFactor = C.VK_BLEND_FACTOR_SRC_ALPHA
+	BLEND_FACTOR_ONE_MINUS_SRC_ALPHA      BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+	BLEND_FACTOR_DST_ALPHA                BlendFactor = C.VK_BLEND_FACTOR_DST_ALPHA
+	BLEND_FACTOR_ONE_MINUS_DST_ALPHA      BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA
+	BLEND_FACTOR_CONSTANT_COLOR           BlendFactor = C.VK_BLEND_FACTOR_CONSTANT_COLOR
+	BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR
+	BLEND_FACTOR_CONSTANT_ALPHA           BlendFactor = C.VK_BLEND_FACTOR_CONSTANT_ALPHA
+	BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA BlendFactor = C.VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA
+)
+
+type BlendOp int32
+
+const (
+	BLEND_OP_ADD              BlendOp = C.VK_BLEND_OP_ADD
+	BLEND_OP_SUBTRACT         BlendOp = C.VK_BLEND_OP_SUBTRACT
+	BLEND_OP_REVERSE_SUBTRACT BlendOp = C.VK_BLEND_OP_REVERSE_SUBTRACT
+	BLEND_OP_MIN              BlendOp = C.VK_BLEND_OP_MIN
+	BLEND_OP_MAX              BlendOp = C.VK_BLEND_OP_MAX
+)
+
 type PipelineColorBlendAttachmentState struct {
-	BlendEnable    bool
-	ColorWriteMask ColorComponentFlags
+	BlendEnable         bool
+	SrcColorBlendFactor BlendFactor
+	DstColorBlendFactor BlendFactor
+	ColorBlendOp        BlendOp
+	SrcAlphaBlendFactor BlendFactor
+	DstAlphaBlendFactor BlendFactor
+	AlphaBlendOp        BlendOp
+	ColorWriteMask      ColorComponentFlags
 }
 
 type ColorComponentFlags uint32
@@ -1695,4 +1730,5 @@ const (
 	FORMAT_R32G32B32_SFLOAT    Format = C.VK_FORMAT_R32G32B32_SFLOAT    // vec3
 	FORMAT_R32G32B32A32_SFLOAT Format = C.VK_FORMAT_R32G32B32A32_SFLOAT // vec4
 	FORMAT_R8G8B8A8_SRGB       Format = C.VK_FORMAT_R8G8B8A8_SRGB
+	FORMAT_R8G8B8A8_UNORM      Format = C.VK_FORMAT_R8G8B8A8_UNORM
 )
