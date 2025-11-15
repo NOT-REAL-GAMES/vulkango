@@ -1,9 +1,9 @@
 package systems
 
 import (
-	"github.com/NOT-REAL-GAMES/vala/ecs"
-	"github.com/NOT-REAL-GAMES/vala/font"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/font"
 )
 
 // TextRenderer holds resources for rendering SDF text

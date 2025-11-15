@@ -11,7 +11,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/NOT-REAL-GAMES/sdl3go"
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 	shaderc "github.com/NOT-REAL-GAMES/vulkango/shaderc"
@@ -1563,6 +1562,13 @@ func main() {
 		fmt.Println("\n=== Rendering via ECS - close window to exit ===")
 		startTime := time.Now()
 		running := true
+
+		// Pen state tracking
+		penX := float32(0.0)
+		penY := float32(0.0)
+		penPressure := float32(0.0)
+		penDown := false
+
 		for running {
 
 			// Handle events
@@ -1575,14 +1581,21 @@ func main() {
 				case sdl.EVENT_PEN_AXIS:
 					axis := event.PenAxis
 					if axis.Axis == sdl.PEN_AXIS_PRESSURE {
-						fmt.Printf("Pressure: %.3f\n", axis.Value)
+						penPressure = axis.Value
 					}
-				case sdl3go.EVENT_PEN_MOTION:
+				case sdl.EVENT_PEN_MOTION:
 					motion := event.PenMotion
-					fmt.Printf("Pen at (%.1f, %.1f) down=%v\n",
-						motion.X, motion.Y, motion.IsDown())
+					penX = motion.X
+					penY = motion.Y
+					penDown = motion.IsDown()
 				}
 			}
+
+			// Update pen data text
+			textComp := world.GetText(helloText)
+			textComp.Content = fmt.Sprintf("Pen: (%.0f, %.0f)  Pressure: %.3f  Down: %v",
+				penX, penY, penPressure, penDown)
+			world.AddText(helloText, textComp)
 
 			// Animate layer2 in a circle
 			elapsed := float32(time.Since(startTime).Seconds())

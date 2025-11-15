@@ -3,8 +3,8 @@ package systems
 import (
 	"unsafe"
 
-	"github.com/NOT-REAL-GAMES/vala/ecs"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
 )
 
 // RenderContext holds the rendering state needed by render systems.
@@ -273,10 +273,10 @@ func RenderLayerContent(world *ecs.World, ctx *RenderContext, entity ecs.Entity)
 
 // CompositeContext holds data needed for the composite pass.
 type CompositeContext struct {
-	CommandBuffer          vk.CommandBuffer
-	CompositePipeline      vk.Pipeline
+	CommandBuffer           vk.CommandBuffer
+	CompositePipeline       vk.Pipeline
 	CompositePipelineLayout vk.PipelineLayout
-	SwapExtent             vk.Extent2D
+	SwapExtent              vk.Extent2D
 }
 
 // CompositeLayer draws a single layer's framebuffer to the swapchain.
