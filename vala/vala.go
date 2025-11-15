@@ -11,13 +11,14 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/NOT-REAL-GAMES/sdl3go"
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 	shaderc "github.com/NOT-REAL-GAMES/vulkango/shaderc"
 
-	"github.com/NOT-REAL-GAMES/vala/ecs"
-	fontpkg "github.com/NOT-REAL-GAMES/vala/font"
-	"github.com/NOT-REAL-GAMES/vala/systems"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
+	fontpkg "github.com/NOT-REAL-GAMES/vulkango/vala/font"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/systems"
 )
 
 const vertexShader = `
@@ -1109,9 +1110,9 @@ func main() {
 				},
 			},
 			Layout: textPipelineLayout,
-		RenderingInfo: &vk.PipelineRenderingCreateInfo{
-			ColorAttachmentFormats: []vk.Format{swapFormat},
-		},
+			RenderingInfo: &vk.PipelineRenderingCreateInfo{
+				ColorAttachmentFormats: []vk.Format{swapFormat},
+			},
 		})
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create text pipeline: %v", err))
@@ -1566,8 +1567,20 @@ func main() {
 
 			// Handle events
 			for event, ok := sdl.PollEvent(); ok; event, ok = sdl.PollEvent() {
-				if event.Type == sdl.EVENT_QUIT {
+				switch event.Type {
+
+				case sdl.EVENT_QUIT:
 					running = false
+
+				case sdl.EVENT_PEN_AXIS:
+					axis := event.PenAxis
+					if axis.Axis == sdl.PEN_AXIS_PRESSURE {
+						fmt.Printf("Pressure: %.3f\n", axis.Value)
+					}
+				case sdl3go.EVENT_PEN_MOTION:
+					motion := event.PenMotion
+					fmt.Printf("Pen at (%.1f, %.1f) down=%v\n",
+						motion.X, motion.Y, motion.IsDown())
 				}
 			}
 
@@ -1900,6 +1913,6 @@ func main() {
 		// Wait for device to finish
 		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 
-		time.Sleep(5 * time.Millisecond)
+		//time.Sleep(5 * time.Millisecond)
 	}
 }
