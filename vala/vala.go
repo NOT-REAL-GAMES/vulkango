@@ -15,6 +15,7 @@ import (
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 	shaderc "github.com/NOT-REAL-GAMES/vulkango/shaderc"
 
+	"github.com/NOT-REAL-GAMES/vulkango/vala/canvas"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
 	fontpkg "github.com/NOT-REAL-GAMES/vulkango/vala/font"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/systems"
@@ -101,10 +102,80 @@ layout(location = 0) in vec2 fragTexCoord;
 
 layout(binding = 0) uniform sampler2D layerTexture;
 
+// Push constant for layer opacity
+layout(push_constant) uniform LayerPushConstants {
+    float opacity; // Layer opacity (0.0 to 1.0)
+} layer;
+
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    outColor = texture(layerTexture, fragTexCoord);
+    vec4 texColor = texture(layerTexture, fragTexCoord);
+    // Apply layer opacity to the alpha channel
+    outColor = vec4(texColor.rgb, texColor.a * layer.opacity);
+}
+`
+
+const brushVertexShader = `
+#version 450
+
+// Input: quad vertices (0,0 to 1,1)
+layout(location = 0) in vec2 inPosition;
+
+// Push constants for brush
+layout(push_constant) uniform BrushPushConstants {
+    vec2 canvasSize;     // Canvas dimensions in pixels
+    vec2 brushPos;       // Brush center in canvas pixels
+    float brushSize;     // Brush radius in pixels
+    float brushOpacity;  // 0.0 to 1.0
+    vec4 brushColor;     // RGBA color
+} brush;
+
+layout(location = 0) out vec2 fragLocalPos; // Position within brush quad (0-1)
+
+void main() {
+    // Calculate brush quad corners in canvas pixels
+    vec2 quadPos = inPosition; // 0,0 to 1,1
+    vec2 canvasPos = brush.brushPos + (quadPos - 0.5) * brush.brushSize * 2.0;
+
+    // Convert to NDC (-1 to 1)
+    vec2 ndc = (canvasPos / brush.canvasSize) * 2.0 - 1.0;
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    fragLocalPos = quadPos;
+}
+`
+
+const brushFragmentShader = `
+#version 450
+
+layout(location = 0) in vec2 fragLocalPos; // 0,0 to 1,1
+
+layout(push_constant) uniform BrushPushConstants {
+    vec2 canvasSize;
+    vec2 brushPos;
+    float brushSize;
+    float brushOpacity;
+    vec4 brushColor;
+} brush;
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    // Calculate distance from center (0.5, 0.5)
+    vec2 center = vec2(0.5, 0.5);
+    float dist = length(fragLocalPos - center);
+
+    // Circular brush with soft edges
+    float radius = 0.5;
+    float softness = 0.1;
+    float alpha = 1.0 - smoothstep(radius - softness, radius, dist);
+
+    // Apply brush opacity
+    alpha *= brush.brushOpacity;
+
+    // Output color with alpha
+    outColor = vec4(brush.brushColor.rgb, brush.brushColor.a);
 }
 `
 
@@ -277,7 +348,10 @@ func main() {
 					QueuePriorities:  []float32{1.0},
 				},
 			},
-			EnabledExtensionNames: []string{"VK_KHR_swapchain"},
+			EnabledExtensionNames: []string{
+				"VK_KHR_swapchain",
+				"VK_EXT_blend_operation_advanced",
+			},
 			Vulkan13Features: &vk.PhysicalDeviceVulkan13Features{
 				DynamicRendering: true, // ENABLE IT!
 			},
@@ -508,6 +582,13 @@ func main() {
 		// Create composite pipeline layout
 		compositePipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
 			SetLayouts: []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_FRAGMENT_BIT,
+					Offset:     0,
+					Size:       4, // sizeof(float) for opacity
+				},
+			},
 		})
 		if err != nil {
 			panic(err)
@@ -568,6 +649,117 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyPipeline(compositePipeline)
+
+		// === Brush Pipeline Setup ===
+		fmt.Println("Creating brush pipeline...")
+
+		// Compile brush shaders
+		brushVertResult, err := compiler.CompileIntoSPV(brushVertexShader, "brush.vert", shaderc.VertexShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("Brush vertex shader compilation failed: %v", err))
+		}
+		brushVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: brushVertResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(brushVertShader)
+
+		brushFragResult, err := compiler.CompileIntoSPV(brushFragmentShader, "brush.frag", shaderc.FragmentShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("Brush fragment shader compilation failed: %v", err))
+		}
+		brushFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: brushFragResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(brushFragShader)
+
+		// Brush push constants: vec2 canvasSize, vec2 brushPos, float size, float opacity, vec4 color
+		// Total: 8 + 8 + 4 + 4 + 16 = 40 bytes
+		brushPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+					Offset:     0,
+					Size:       48, // sizeof(BrushPushConstants)
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipelineLayout(brushPipelineLayout)
+
+		// Create brush graphics pipeline
+		brushPipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
+			Stages: []vk.PipelineShaderStageCreateInfo{
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: brushVertShader, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: brushFragShader, Name: "main"},
+			},
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{
+						Binding:   0,
+						Stride:    8, // 2 floats (vec2)
+						InputRate: vk.VERTEX_INPUT_RATE_VERTEX,
+					},
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{
+						Location: 0,
+						Binding:  0,
+						Format:   vk.FORMAT_R32G32_SFLOAT, // vec2
+						Offset:   0,
+					},
+				},
+			},
+			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			},
+			ViewportState: &vk.PipelineViewportStateCreateInfo{
+				Viewports: []vk.Viewport{},
+				Scissors:  []vk.Rect2D{},
+			},
+			RasterizationState: &vk.PipelineRasterizationStateCreateInfo{
+				PolygonMode: vk.POLYGON_MODE_FILL,
+				CullMode:    vk.CULL_MODE_NONE,
+				FrontFace:   vk.FRONT_FACE_COUNTER_CLOCKWISE,
+				LineWidth:   1.0,
+			},
+			MultisampleState: &vk.PipelineMultisampleStateCreateInfo{
+				RasterizationSamples: vk.SAMPLE_COUNT_1_BIT,
+			},
+			ColorBlendState: &vk.PipelineColorBlendStateCreateInfo{
+				Attachments: []vk.PipelineColorBlendAttachmentState{
+					{
+						BlendEnable:         true,
+						SrcColorBlendFactor: vk.BLEND_FACTOR_SRC_ALPHA,
+						DstColorBlendFactor: vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+						ColorBlendOp:        vk.BLEND_OP_ADD,
+						SrcAlphaBlendFactor: vk.BLEND_FACTOR_ONE,
+						DstAlphaBlendFactor: vk.BLEND_FACTOR_ZERO,
+						AlphaBlendOp:        vk.BLEND_OP_ADD,
+						ColorWriteMask:      vk.COLOR_COMPONENT_ALL,
+					},
+				},
+			},
+			DynamicState: &vk.PipelineDynamicStateCreateInfo{
+				DynamicStates: []vk.DynamicState{
+					vk.DYNAMIC_STATE_VIEWPORT,
+					vk.DYNAMIC_STATE_SCISSOR,
+				},
+			},
+			Layout: brushPipelineLayout,
+			RenderingInfo: &vk.PipelineRenderingCreateInfo{
+				ColorAttachmentFormats: []vk.Format{vk.FORMAT_R8G8B8A8_UNORM}, // Canvas format
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipeline(brushPipeline)
+
+		fmt.Println("Brush pipeline created!")
 
 		// Create descriptor pool for composite pass (2 sets for 2 layers)
 		compositeDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
@@ -650,6 +842,38 @@ func main() {
 
 		fmt.Println("Vertex and index buffers created!")
 
+		// Create brush vertex buffer (simple quad 0,0 to 1,1)
+		brushVertices := [][2]float32{
+			{0.0, 0.0}, // Bottom-left
+			{1.0, 0.0}, // Bottom-right
+			{1.0, 1.0}, // Top-right
+			{0.0, 0.0}, // Bottom-left
+			{1.0, 1.0}, // Top-right
+			{0.0, 1.0}, // Top-left
+		}
+		brushVertexBufferSize := uint64(len(brushVertices) * 8) // 6 vertices * 8 bytes each
+
+		brushVertexBuffer, brushVertexMemory, err := device.CreateBufferWithMemory(
+			brushVertexBufferSize,
+			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(brushVertexBuffer)
+		defer device.FreeMemory(brushVertexMemory)
+
+		// Upload brush vertex data
+		brushVertexData := (*[1 << 30]byte)(unsafe.Pointer(&brushVertices[0]))[:brushVertexBufferSize:brushVertexBufferSize]
+		err = device.UploadToBuffer(brushVertexMemory, brushVertexData)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Brush vertex buffer created!")
+
 		// Create command pool
 		commandPool, err := device.CreateCommandPool(&vk.CommandPoolCreateInfo{
 			Flags:            vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -659,6 +883,54 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyCommandPool(commandPool)
+
+		// Create paint canvas
+		fmt.Println("\nCreating paint canvas...")
+		paintCanvas, err := canvas.New(canvas.Config{
+			Device:         device,
+			PhysicalDevice: physicalDevice,
+			Width:          2048,
+			Height:         2048,
+			Format:         vk.FORMAT_R8G8B8A8_UNORM,
+			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
+				vk.IMAGE_USAGE_SAMPLED_BIT |
+				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			UseSparseBinding: false, // Start with dense allocation
+		}, commandPool, queue)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create paint canvas: %v", err))
+		}
+		defer paintCanvas.Destroy()
+		fmt.Printf("Paint canvas created: %dx%d\n", paintCanvas.GetWidth(), paintCanvas.GetHeight())
+
+		// Clear canvas to white
+		whitePixels := make([]byte, 2048*2048*4)
+		for i := 0; i < len(whitePixels); i += 4 {
+			whitePixels[i] = 255   // R
+			whitePixels[i+1] = 255 // G
+			whitePixels[i+2] = 255 // B
+			whitePixels[i+3] = 255 // A
+		}
+		err = paintCanvas.Upload(0, 0, 2048, 2048, whitePixels)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to clear canvas: %v", err))
+		}
+		fmt.Println("Canvas cleared to white")
+
+		// Create sampler for paint canvas
+		canvasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
+			MagFilter:    vk.FILTER_LINEAR,
+			MinFilter:    vk.FILTER_LINEAR,
+			MipmapMode:   vk.SAMPLER_MIPMAP_MODE_LINEAR,
+			AddressModeU: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeV: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeW: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			MaxLod:       1.0,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create canvas sampler: %v", err))
+		}
+		defer device.DestroySampler(canvasSampler)
 
 		fmt.Println("\nCreating texture...")
 
@@ -1215,7 +1487,7 @@ func main() {
 		}
 		descriptorSet := descriptorSets[0]
 
-		// Update descriptor set with texture
+		// Update descriptor set with paint canvas
 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
 			{
 				DstSet:          descriptorSet,
@@ -1224,8 +1496,8 @@ func main() {
 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 				ImageInfo: []vk.DescriptorImageInfo{
 					{
-						Sampler:     textureSampler,
-						ImageView:   textureImageView,
+						Sampler:     canvasSampler,
+						ImageView:   paintCanvas.GetView(),
 						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					},
 				},
@@ -1290,14 +1562,14 @@ func main() {
 			DescriptorSetLayout: descriptorSetLayout,
 		})
 
-		// Add TextureData component
+		// Add TextureData component (paint canvas)
 		world.AddTextureData(layer1, &ecs.TextureData{
-			Image:       textureImage,
-			ImageView:   textureImageView,
-			ImageMemory: textureMemory,
-			Sampler:     textureSampler,
-			Width:       imageData.Width,
-			Height:      imageData.Height,
+			Image:       paintCanvas.GetImage(),
+			ImageView:   paintCanvas.GetView(),
+			ImageMemory: vk.DeviceMemory{}, // Canvas manages its own memory
+			Sampler:     canvasSampler,
+			Width:       paintCanvas.GetWidth(),
+			Height:      paintCanvas.GetHeight(),
 		})
 
 		// Add BlendMode component (visible, opaque)
@@ -1566,6 +1838,8 @@ func main() {
 		// Pen state tracking
 		penX := float32(0.0)
 		penY := float32(0.0)
+		prevPenX := float32(0.0)
+		prevPenY := float32(0.0)
 		penPressure := float32(0.0)
 		penDown := false
 
@@ -1604,6 +1878,10 @@ func main() {
 			layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
 			layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 
+			// Oscillate layer2 opacity between 0.0 and 1.0
+			layer2Blend := world.GetBlendMode(layer2)
+			layer2Blend.Opacity = (float32(math.Sin(float64(elapsed*8.0))) + 1.0) / 2.0
+
 			// Wait for previous frame
 			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 			device.ResetFences([]vk.Fence{inFlightFence})
@@ -1621,6 +1899,178 @@ func main() {
 			cmd := commandBuffers[imageIndex]
 			cmd.Reset(0)
 			cmd.Begin(&vk.CommandBufferBeginInfo{})
+
+			// === PASS 0: Render brush strokes to canvas (if pen is down) ===
+			if penDown && penPressure > 0.01 {
+				// Map pen coordinates from screen space to canvas space
+				canvasX := penX * (float32(paintCanvas.GetWidth()) / float32(swapExtent.Width))
+				canvasY := penY * (float32(paintCanvas.GetHeight()) / float32(swapExtent.Height))
+			// Initialize previous position on first stroke to avoid interpolating from (0,0)
+			if prevPenX == 0.0 && prevPenY == 0.0 {
+				prevPenX = penX
+				prevPenY = penY
+			}
+
+				// Transition canvas: SHADER_READ → COLOR_ATTACHMENT
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{
+						{
+							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvas.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+					},
+				)
+
+				// Begin rendering to canvas
+				cmd.BeginRendering(&vk.RenderingInfo{
+					RenderArea: vk.Rect2D{
+						Offset: vk.Offset2D{X: 0, Y: 0},
+						Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+					},
+					LayerCount: 1,
+					ColorAttachments: []vk.RenderingAttachmentInfo{
+						{
+							ImageView:   paintCanvas.GetView(),
+							ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+							LoadOp:      vk.ATTACHMENT_LOAD_OP_LOAD, // Load existing canvas content
+							StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
+						},
+					},
+				})
+
+				// Bind brush pipeline
+				cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipeline)
+
+				// Set viewport and scissor
+				cmd.SetViewport(0, []vk.Viewport{
+					{
+						X:        0,
+						Y:        0,
+						Width:    float32(paintCanvas.GetWidth()),
+						Height:   float32(paintCanvas.GetHeight()),
+						MinDepth: 0.0,
+						MaxDepth: 1.0,
+					},
+				})
+				cmd.SetScissor(0, []vk.Rect2D{
+					{
+						Offset: vk.Offset2D{X: 0, Y: 0},
+						Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+					},
+				})
+
+				// Set brush push constants
+				type BrushPushConstants struct {
+					CanvasWidth  float32
+					CanvasHeight float32
+					BrushX       float32
+					BrushY       float32
+					BrushSize    float32
+					BrushOpacity float32
+					_            float32 // Padding for vec4 alignment
+					_            float32 // Padding for vec4 alignment
+					ColorR       float32
+					ColorG       float32
+					ColorB       float32
+					ColorA       float32
+				}
+
+				// Bind brush vertex buffer (once, before loop)
+				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
+
+				// Interpolate brush stamps between previous and current positions
+				prevCanvasX := prevPenX * (float32(paintCanvas.GetWidth()) / float32(swapExtent.Width))
+				prevCanvasY := prevPenY * (float32(paintCanvas.GetHeight()) / float32(swapExtent.Height))
+
+				// Calculate distance between previous and current positions
+				dx := canvasX - prevCanvasX
+				dy := canvasY - prevCanvasY
+				distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+
+				// Brush spacing (smaller = more stamps, smoother stroke)
+				brushRadius := float32(10.0)
+				brushSpacing := brushRadius * 0.1
+
+				// Calculate number of steps
+				steps := int(distance/brushSpacing) + 1
+				if steps < 1 {
+					steps = 1
+				}
+
+				// Render brush stamps along interpolated path
+				for i := 0; i <= steps; i++ {
+					t := float32(i) / float32(steps)
+					interpX := prevCanvasX + dx*t
+					interpY := prevCanvasY + dy*t
+
+					pushConstants := BrushPushConstants{
+						CanvasWidth:  float32(paintCanvas.GetWidth()),
+						CanvasHeight: float32(paintCanvas.GetHeight()),
+						BrushX:       interpX,
+						BrushY:       interpY,
+						BrushSize:    brushRadius * penPressure,
+						BrushOpacity: 1.0,
+						ColorR:       1.0, // Red
+						ColorG:       0.0,
+						ColorB:       0.0,
+						ColorA:       1.0,
+					}
+
+					cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
+
+					// Draw brush quad
+					cmd.Draw(6, 1, 0, 0)
+				}
+
+				cmd.EndRendering()
+
+				// Transition canvas: COLOR_ATTACHMENT → SHADER_READ
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{
+						{
+							SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvas.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+					},
+				)
+			// Update previous position for next frame
+			prevPenX = penX
+			prevPenY = penY
+			} else {
+			// Reset previous position when pen is up to prevent interpolation between strokes
+			prevPenX = 0.0
+			prevPenY = 0.0
+		}
 
 			// ===  PASS 1: Render each layer to its framebuffer ===
 			for _, entity := range sortedLayers {
@@ -1773,8 +2223,9 @@ func main() {
 
 			for _, entity := range sortedLayers {
 				pipeline := world.GetVulkanPipeline(entity)
-				if pipeline != nil {
-					systems.CompositeLayer(compositeCtx, pipeline.CompositeDescriptorSet)
+				blendMode := world.GetBlendMode(entity)
+				if pipeline != nil && blendMode != nil {
+					systems.CompositeLayer(compositeCtx, pipeline.CompositeDescriptorSet, blendMode.Opacity)
 				}
 			}
 
@@ -1926,6 +2377,6 @@ func main() {
 		// Wait for device to finish
 		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 
-		//time.Sleep(5 * time.Millisecond)
+		sdl.Delay(5)
 	}
 }

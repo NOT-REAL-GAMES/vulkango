@@ -281,7 +281,7 @@ type CompositeContext struct {
 
 // CompositeLayer draws a single layer's framebuffer to the swapchain.
 // This is called during Pass 2 (compositing).
-func CompositeLayer(ctx *CompositeContext, layerDescriptorSet vk.DescriptorSet) {
+func CompositeLayer(ctx *CompositeContext, layerDescriptorSet vk.DescriptorSet, opacity float32) {
 	// Bind composite pipeline
 	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, ctx.CompositePipeline)
 
@@ -292,6 +292,15 @@ func CompositeLayer(ctx *CompositeContext, layerDescriptorSet vk.DescriptorSet) 
 		0,
 		[]vk.DescriptorSet{layerDescriptorSet},
 		nil,
+	)
+
+	// Set push constants for layer opacity
+	ctx.CommandBuffer.CmdPushConstants(
+		ctx.CompositePipelineLayout,
+		vk.SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		4, // sizeof(float32)
+		unsafe.Pointer(&opacity),
 	)
 
 	// Set viewport
