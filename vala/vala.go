@@ -5,9 +5,12 @@ import (
 	"image"
 	"image/draw"
 	_ "image/jpeg" // Register JPEG decoder
+	_ "image/png"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -223,6 +226,353 @@ func LoadImage(path string) (*ImageData, error) {
 func evaluateQuadraticBezier(p0, p1, p2, t float32) float32 {
 	oneMinusT := 1.0 - t
 	return oneMinusT*oneMinusT*p0 + 2.0*oneMinusT*t*p1 + t*t*p2
+}
+
+// CreateImageLayer creates a new layer entity with an image loaded from the specified file path
+func CreateImageLayer(
+	world *ecs.World,
+	device *vk.Device,
+	physicalDevice *vk.PhysicalDevice,
+	commandPool *vk.CommandPool,
+	queue *vk.Queue,
+	pipeline *vk.Pipeline,
+	pipelineLayout *vk.PipelineLayout,
+	descriptorPool *vk.DescriptorPool,
+	descriptorSetLayout *vk.DescriptorSetLayout,
+	compositeDescriptorPool vk.DescriptorPool,
+	compositeDescriptorSetLayout vk.DescriptorSetLayout,
+	layerSampler vk.Sampler,
+	swapExtent vk.Extent2D,
+	imagePath string,
+	zindex int,
+) (ecs.Entity, error) {
+	// Load image from file
+	imageData, err := LoadImage(imagePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load image: %v", err)
+	}
+
+	fmt.Printf("Creating layer from: %s (%dx%d)\n", imagePath, imageData.Width, imageData.Height)
+
+	textureWidth := imageData.Width
+	textureHeight := imageData.Height
+	textureData := imageData.Pixels
+	textureSize := uint64(len(textureData))
+
+	// Create staging buffer
+	stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(
+		textureSize,
+		vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+		vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		*physicalDevice,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create staging buffer: %v", err)
+	}
+	defer device.DestroyBuffer(stagingBuffer)
+	defer device.FreeMemory(stagingMemory)
+
+	// Upload texture data to staging buffer
+	err = device.UploadToBuffer(stagingMemory, textureData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to upload to buffer: %v", err)
+	}
+
+	// Create texture image
+	textureImage, textureMemory, err := device.CreateImageWithMemory(
+		textureWidth, textureHeight,
+		vk.FORMAT_R8G8B8A8_SRGB,
+		vk.IMAGE_TILING_OPTIMAL,
+		vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+		vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		*physicalDevice,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create image: %v", err)
+	}
+
+	// Create command buffer for texture upload
+	uploadCmdBuffer, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+		CommandPool:        *commandPool,
+		Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+		CommandBufferCount: 1,
+	})
+	if err != nil {
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to allocate command buffer: %v", err)
+	}
+	uploadCmd := uploadCmdBuffer[0]
+
+	// Record upload commands
+	uploadCmd.Begin(&vk.CommandBufferBeginInfo{
+		Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+	})
+
+	// Transition image to transfer dst
+	uploadCmd.PipelineBarrier(
+		vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		vk.PIPELINE_STAGE_TRANSFER_BIT,
+		0,
+		[]vk.ImageMemoryBarrier{{
+			SrcAccessMask:       vk.ACCESS_NONE,
+			DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+			OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+			NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			SrcQueueFamilyIndex: ^uint32(0),
+			DstQueueFamilyIndex: ^uint32(0),
+			Image:               textureImage,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		}},
+	)
+
+	// Copy buffer to image
+	uploadCmd.CopyBufferToImage(stagingBuffer, textureImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, []vk.BufferImageCopy{{
+		BufferOffset:      0,
+		BufferRowLength:   0,
+		BufferImageHeight: 0,
+		ImageSubresource: vk.ImageSubresourceLayers{
+			AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+			MipLevel:       0,
+			BaseArrayLayer: 0,
+			LayerCount:     1,
+		},
+		ImageOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+		ImageExtent: vk.Extent3D{Width: textureWidth, Height: textureHeight, Depth: 1},
+	}})
+
+	// Transition to shader read
+	uploadCmd.PipelineBarrier(
+		vk.PIPELINE_STAGE_TRANSFER_BIT,
+		vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		0,
+		[]vk.ImageMemoryBarrier{{
+			SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+			DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+			OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			SrcQueueFamilyIndex: ^uint32(0),
+			DstQueueFamilyIndex: ^uint32(0),
+			Image:               textureImage,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		}},
+	)
+
+	uploadCmd.End()
+
+	// Submit and wait
+	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
+	if err != nil {
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to submit command buffer: %v", err)
+	}
+	queue.WaitIdle()
+	device.FreeCommandBuffers(*commandPool, []vk.CommandBuffer{uploadCmd})
+
+	// Create image view
+	textureImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+		Image:    textureImage,
+		ViewType: vk.IMAGE_VIEW_TYPE_2D,
+		Format:   vk.FORMAT_R8G8B8A8_SRGB,
+		SubresourceRange: vk.ImageSubresourceRange{
+			AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+			BaseMipLevel:   0,
+			LevelCount:     1,
+			BaseArrayLayer: 0,
+			LayerCount:     1,
+		},
+	})
+	if err != nil {
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to create image view: %v", err)
+	}
+
+	// Create sampler
+	textureSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
+		MagFilter:        vk.FILTER_LINEAR,
+		MinFilter:        vk.FILTER_LINEAR,
+		AddressModeU:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		AddressModeV:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		AddressModeW:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		AnisotropyEnable: false,
+		BorderColor:      vk.BORDER_COLOR_INT_OPAQUE_BLACK,
+		MipmapMode:       vk.SAMPLER_MIPMAP_MODE_LINEAR,
+	})
+	if err != nil {
+		device.DestroyImageView(textureImageView)
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to create sampler: %v", err)
+	}
+
+	// Create ECS entity
+	entity := world.CreateEntity()
+
+	// Add Transform component (centered)
+	transform := ecs.NewTransform()
+	transform.ZIndex = zindex // Ensure dropped layers appear on top
+	world.AddTransform(entity, transform)
+
+	// Add VulkanPipeline component
+	world.AddVulkanPipeline(entity, &ecs.VulkanPipeline{
+		Pipeline:            *pipeline,
+		PipelineLayout:      *pipelineLayout,
+		DescriptorPool:      *descriptorPool,
+		DescriptorSet:       vk.DescriptorSet{}, // Created on-demand
+		DescriptorSetLayout: *descriptorSetLayout,
+	})
+
+	// Add TextureData component
+	world.AddTextureData(entity, &ecs.TextureData{
+		Image:       textureImage,
+		ImageView:   textureImageView,
+		ImageMemory: textureMemory,
+		Sampler:     textureSampler,
+	})
+
+	// Add BlendMode component (default 100% opacity)
+	world.AddBlendMode(entity, ecs.NewBlendMode())
+
+	// Create RenderTarget framebuffer for this layer
+	layerImage, layerImageMemory, err := device.CreateImageWithMemory(
+		swapExtent.Width,
+		swapExtent.Height,
+		vk.FORMAT_R8G8B8A8_UNORM,
+		vk.IMAGE_TILING_OPTIMAL,
+		vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+		vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		*physicalDevice,
+	)
+	if err != nil {
+		// Clean up already-created resources
+		device.DestroySampler(textureSampler)
+		device.DestroyImageView(textureImageView)
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to create layer framebuffer: %v", err)
+	}
+
+	layerImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+		Image:    layerImage,
+		ViewType: vk.IMAGE_VIEW_TYPE_2D,
+		Format:   vk.FORMAT_R8G8B8A8_UNORM,
+		SubresourceRange: vk.ImageSubresourceRange{
+			AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+			BaseMipLevel:   0,
+			LevelCount:     1,
+			BaseArrayLayer: 0,
+			LayerCount:     1,
+		},
+	})
+	if err != nil {
+		device.DestroyImage(layerImage)
+		device.FreeMemory(layerImageMemory)
+		device.DestroySampler(textureSampler)
+		device.DestroyImageView(textureImageView)
+		device.DestroyImage(textureImage)
+		device.FreeMemory(textureMemory)
+		return 0, fmt.Errorf("failed to create layer framebuffer view: %v", err)
+	}
+
+	// Add RenderTarget component
+	world.AddRenderTarget(entity, &ecs.RenderTarget{
+		Image:       layerImage,
+		ImageView:   layerImageView,
+		ImageMemory: layerImageMemory,
+		Format:      vk.FORMAT_R8G8B8A8_UNORM,
+		Width:       swapExtent.Width,
+		Height:      swapExtent.Height,
+	})
+
+	// Transition RenderTarget image to COLOR_ATTACHMENT_OPTIMAL
+	transitionCmd, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+		CommandPool:        *commandPool,
+		Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+		CommandBufferCount: 1,
+	})
+	if err != nil {
+		return entity, fmt.Errorf("failed to allocate transition command buffer: %v", err)
+	}
+	cmd := transitionCmd[0]
+
+	cmd.Begin(&vk.CommandBufferBeginInfo{Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT})
+	cmd.PipelineBarrier(
+		vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		0,
+		[]vk.ImageMemoryBarrier{{
+			SrcAccessMask:       vk.ACCESS_NONE,
+			DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+			NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			SrcQueueFamilyIndex: ^uint32(0),
+			DstQueueFamilyIndex: ^uint32(0),
+			Image:               layerImage,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		}},
+	)
+	cmd.End()
+
+	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{cmd}}}, vk.Fence{})
+	if err != nil {
+		return entity, fmt.Errorf("failed to submit transition command: %v", err)
+	}
+	queue.WaitIdle()
+	device.FreeCommandBuffers(*commandPool, []vk.CommandBuffer{cmd})
+
+	// Create composite descriptor set for this layer
+	compositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+		DescriptorPool: compositeDescriptorPool,
+		SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
+	})
+	if err != nil {
+		return entity, fmt.Errorf("failed to allocate composite descriptor set: %v", err)
+	}
+	compositeDescSet := compositeSets[0]
+
+	// Update composite descriptor set to bind layer's framebuffer texture
+	device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		{
+			DstSet:          compositeDescSet,
+			DstBinding:      0,
+			DstArrayElement: 0,
+			DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			ImageInfo: []vk.DescriptorImageInfo{
+				{
+					Sampler:     layerSampler,
+					ImageView:   layerImageView,
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				},
+			},
+		},
+	})
+
+	// Update VulkanPipeline with composite descriptor set
+	layerPipeline := world.GetVulkanPipeline(entity)
+	layerPipeline.CompositeDescriptorSet = compositeDescSet
+
+	fmt.Printf("Created layer entity %d from %s\n", entity, imagePath)
+	return entity, nil
 }
 
 func main() {
@@ -768,11 +1118,11 @@ func main() {
 
 		fmt.Println("Brush pipeline created!")
 
-		// Create descriptor pool for composite pass (2 sets for 2 layers)
+		// Create descriptor pool for composite pass (100 sets to support dynamic layer creation)
 		compositeDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
-			MaxSets: 2,
+			MaxSets: 100,
 			PoolSizes: []vk.DescriptorPoolSize{
-				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: 2},
+				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: 100},
 			},
 		})
 		if err != nil {
@@ -1528,7 +1878,7 @@ func main() {
 
 		// Add Transform component
 		transform1 := ecs.NewTransform()
-		transform1.ZIndex = -10 // Layer 1 is in the back
+		transform1.ZIndex = -50 // Layer 1 is in the back
 		world.AddTransform(layer1, transform1)
 
 		// Add VulkanPipeline component
@@ -1818,15 +2168,17 @@ func main() {
 		penY := float32(0.0)
 		prevPenX := float32(0.0)
 		prevPenY := float32(0.0)
-	prevPrevPenX := float32(0.0) // For Bezier control point calculation
-	prevPrevPenY := float32(0.0)
-	prevPrevPenPressure := float32(0.0)
+		prevPrevPenX := float32(0.0) // For Bezier control point calculation
+		prevPrevPenY := float32(0.0)
+		prevPrevPenPressure := float32(0.0)
 
-	// Brush settings
-	useBezierInterpolation := true // Toggle between linear and Bezier
+		// Brush settings
+		useBezierInterpolation := true // Toggle between linear and Bezier
 		penPressure := float32(0.0)
 		prevPenPressure := float32(0.0)
 		penDown := false
+
+		currentLayer := 0
 
 		for running {
 
@@ -1856,6 +2208,44 @@ func main() {
 					penX = motion.X
 					penY = motion.Y
 					penDown = motion.IsDown()
+
+				case sdl.EVENT_DROP_COMPLETE:
+					fmt.Printf("File loaded!")
+
+				case sdl.EVENT_DROP_TEXT:
+					drop := event.Drop
+					filePath := drop.Data
+					fmt.Printf("File dropped: %s\n", filePath)
+
+					// Check if it's an image file
+					ext := strings.ToLower(filepath.Ext(filePath))
+					if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" {
+						fmt.Println("Loading dropped image...")
+						_, err := CreateImageLayer(
+							world,
+							&device,
+							&physicalDevice,
+							&commandPool,
+							&queue,
+							&pipeline,
+							&pipelineLayout,
+							&descriptorPool,
+							&descriptorSetLayout,
+							compositeDescriptorPool,
+							compositeDescriptorSetLayout,
+							layerSampler,
+							swapExtent,
+							filePath,
+							currentLayer,
+						)
+						if err != nil {
+							fmt.Printf("Failed to create layer: %v\n", err)
+						} else {
+							currentLayer++
+						}
+					} else {
+						fmt.Printf("Unsupported file type: %s\n", ext)
+					}
 				}
 			}
 
@@ -2019,58 +2409,58 @@ func main() {
 				if steps < 1 {
 					steps = 1
 				}
-			// Calculate prevPrev canvas positions for Bezier control points
-			prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
-			prevPrevClipY := (prevPrevPenY/float32(swapExtent.Height))*2.0 - 1.0
-			prevPrevLocalClipX := (prevPrevClipX - l2tx) / layer2Transform.ScaleX
-			prevPrevLocalClipY := (prevPrevClipY - l2ty) / layer2Transform.ScaleX
-			prevPrevCanvasX := (prevPrevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
-			prevPrevCanvasY := (prevPrevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
+				// Calculate prevPrev canvas positions for Bezier control points
+				prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
+				prevPrevClipY := (prevPrevPenY/float32(swapExtent.Height))*2.0 - 1.0
+				prevPrevLocalClipX := (prevPrevClipX - l2tx) / layer2Transform.ScaleX
+				prevPrevLocalClipY := (prevPrevClipY - l2ty) / layer2Transform.ScaleX
+				prevPrevCanvasX := (prevPrevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
+				prevPrevCanvasY := (prevPrevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
-			// Calculate Bezier control points based on stroke direction
-			controlX := prevCanvasX
-			controlY := prevCanvasY
-			controlP := prevPenPressure
-			
-			if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
-				controlX = prevCanvasX + (prevCanvasX - prevPrevCanvasX) * 0.25
-				controlY = prevCanvasY + (prevCanvasY - prevPrevCanvasY) * 0.25
-				controlP = prevPenPressure + (prevPenPressure - prevPrevPenPressure) * 0.25
-			}
+				// Calculate Bezier control points based on stroke direction
+				controlX := prevCanvasX
+				controlY := prevCanvasY
+				controlP := prevPenPressure
 
-			// Render brush stamps along interpolated path
-			for i := 0; i <= steps; i++ {
-				t := float32(i) / float32(steps)
-				
-				var interpX, interpY, interpP float32
-				if useBezierInterpolation && (prevPrevPenX != 0.0 || prevPrevPenY != 0.0) {
-					// Quadratic Bezier interpolation
-					interpX = evaluateQuadraticBezier(prevCanvasX, controlX, canvasX, t)
-					interpY = evaluateQuadraticBezier(prevCanvasY, controlY, canvasY, t)
-					interpP = evaluateQuadraticBezier(prevPenPressure, controlP, penPressure, t)
-				} else {
-					// Linear interpolation (fallback)
-					interpX = prevCanvasX + dx*t
-					interpY = prevCanvasY + dy*t
-					interpP = prevPenPressure + dp*t
+				if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
+					controlX = prevCanvasX + (prevCanvasX-prevPrevCanvasX)*0.25
+					controlY = prevCanvasY + (prevCanvasY-prevPrevCanvasY)*0.25
+					controlP = prevPenPressure + (prevPenPressure-prevPrevPenPressure)*0.25
 				}
 
-				pushConstants := BrushPushConstants{
-					CanvasWidth:  float32(paintCanvas.GetWidth()),
-					CanvasHeight: float32(paintCanvas.GetHeight()),
-					BrushX:       interpX,
-					BrushY:       interpY,
-					BrushSize:    brushRadius * interpP,
-					BrushOpacity: 1.0,
-					ColorR:       1.0,
-					ColorG:       0.0,
-					ColorB:       0.0,
-					ColorA:       1.0,
-				}
+				// Render brush stamps along interpolated path
+				for i := 0; i <= steps; i++ {
+					t := float32(i) / float32(steps)
 
-				cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
-				cmd.Draw(6, 1, 0, 0)
-			}
+					var interpX, interpY, interpP float32
+					if useBezierInterpolation && (prevPrevPenX != 0.0 || prevPrevPenY != 0.0) {
+						// Quadratic Bezier interpolation
+						interpX = evaluateQuadraticBezier(prevCanvasX, controlX, canvasX, t)
+						interpY = evaluateQuadraticBezier(prevCanvasY, controlY, canvasY, t)
+						interpP = evaluateQuadraticBezier(prevPenPressure, controlP, penPressure, t)
+					} else {
+						// Linear interpolation (fallback)
+						interpX = prevCanvasX + dx*t
+						interpY = prevCanvasY + dy*t
+						interpP = prevPenPressure + dp*t
+					}
+
+					pushConstants := BrushPushConstants{
+						CanvasWidth:  float32(paintCanvas.GetWidth()),
+						CanvasHeight: float32(paintCanvas.GetHeight()),
+						BrushX:       interpX,
+						BrushY:       interpY,
+						BrushSize:    brushRadius * interpP,
+						BrushOpacity: 1.0,
+						ColorR:       1.0,
+						ColorG:       0.0,
+						ColorB:       0.0,
+						ColorA:       1.0,
+					}
+
+					cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
+					cmd.Draw(6, 1, 0, 0)
+				}
 
 				cmd.EndRendering()
 
