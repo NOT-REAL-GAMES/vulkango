@@ -10,11 +10,57 @@ import (
 // RenderContext holds the rendering state needed by render systems.
 // This is passed to render systems each frame.
 type RenderContext struct {
-	CommandBuffer vk.CommandBuffer
-	SwapExtent    vk.Extent2D
-	VertexBuffer  vk.Buffer
-	IndexBuffer   vk.Buffer
-	IndexCount    uint32
+	CommandBuffer       vk.CommandBuffer
+	SwapExtent          vk.Extent2D
+	VertexBuffer        vk.Buffer
+	IndexBuffer         vk.Buffer
+	IndexCount          uint32
+	Device              vk.Device
+	DescriptorPool      vk.DescriptorPool
+	DescriptorSetLayout vk.DescriptorSetLayout
+}
+
+// ensureDescriptorSet creates a descriptor set for a layer if it doesn't have one.
+// This allows layers to dynamically get descriptor sets based on their TextureData.
+func ensureDescriptorSet(world *ecs.World, entity ecs.Entity, ctx *RenderContext) {
+	pipeline := world.GetVulkanPipeline(entity)
+	textureData := world.GetTextureData(entity)
+
+	// If descriptor set already exists, nothing to do
+	if pipeline.DescriptorSet != (vk.DescriptorSet{}) {
+		return
+	}
+
+	// Allocate a new descriptor set
+	descriptorSets, err := ctx.Device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+		DescriptorPool: ctx.DescriptorPool,
+		SetLayouts:     []vk.DescriptorSetLayout{ctx.DescriptorSetLayout},
+	})
+	if err != nil {
+		panic(err) // In production, handle this more gracefully
+	}
+
+	descriptorSet := descriptorSets[0]
+
+	// Update descriptor set with the layer's texture data
+	ctx.Device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		{
+			DstSet:          descriptorSet,
+			DstBinding:      0,
+			DstArrayElement: 0,
+			DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			ImageInfo: []vk.DescriptorImageInfo{
+				{
+					Sampler:     textureData.Sampler,
+					ImageView:   textureData.ImageView,
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				},
+			},
+		},
+	})
+
+	// Update the pipeline component with the new descriptor set
+	pipeline.DescriptorSet = descriptorSet
 }
 
 // RenderLayers renders all visible layers to the command buffer.
@@ -201,6 +247,9 @@ func RenderLayerContent(world *ecs.World, ctx *RenderContext, entity ecs.Entity)
 	if blend != nil && !blend.Visible {
 		return
 	}
+
+	// Ensure this layer has a descriptor set based on its TextureData
+	ensureDescriptorSet(world, entity, ctx)
 
 	// Bind layer's content rendering pipeline
 	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, pipeline.Pipeline)

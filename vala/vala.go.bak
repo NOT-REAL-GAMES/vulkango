@@ -1464,11 +1464,11 @@ func main() {
 
 		// Create descriptor pool
 		descriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
-			MaxSets: 100,
+			MaxSets: 1,
 			PoolSizes: []vk.DescriptorPoolSize{
 				{
 					Type:            vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					DescriptorCount: 100,
+					DescriptorCount: 1,
 				},
 			},
 		})
@@ -1477,6 +1477,34 @@ func main() {
 		}
 		defer device.DestroyDescriptorPool(descriptorPool)
 
+		// Allocate descriptor set
+		descriptorSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+			DescriptorPool: descriptorPool,
+			SetLayouts:     []vk.DescriptorSetLayout{descriptorSetLayout},
+		})
+		if err != nil {
+			panic(err)
+		}
+		descriptorSet := descriptorSets[0]
+
+		// Update descriptor set with paint canvas
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          descriptorSet,
+				DstBinding:      0,
+				DstArrayElement: 0,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{
+					{
+						Sampler:     canvasSampler,
+						ImageView:   paintCanvas.GetView(),
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					},
+				},
+			},
+		})
+
+		fmt.Println("Descriptor sets created and updated!")
 
 		// Allocate command buffers (one per swapchain image)
 		commandBuffers, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -1530,18 +1558,18 @@ func main() {
 			Pipeline:            pipeline,
 			PipelineLayout:      pipelineLayout,
 			DescriptorPool:      descriptorPool,
-			DescriptorSet:       vk.DescriptorSet{}, // Will be created on-demand
+			DescriptorSet:       descriptorSet,
 			DescriptorSetLayout: descriptorSetLayout,
 		})
 
-		// Add TextureData component (Djungelskog texture)
+		// Add TextureData component (paint canvas)
 		world.AddTextureData(layer1, &ecs.TextureData{
-			Image:       textureImage,
-			ImageView:   textureImageView,
-			ImageMemory: textureMemory,
-			Sampler:     textureSampler,
-			Width:       imageData.Width,
-			Height:      imageData.Height,
+			Image:       paintCanvas.GetImage(),
+			ImageView:   paintCanvas.GetView(),
+			ImageMemory: vk.DeviceMemory{}, // Canvas manages its own memory
+			Sampler:     canvasSampler,
+			Width:       paintCanvas.GetWidth(),
+			Height:      paintCanvas.GetHeight(),
 		})
 
 		// Add BlendMode component (visible, opaque)
@@ -1637,18 +1665,18 @@ func main() {
 			Pipeline:            pipeline,
 			PipelineLayout:      pipelineLayout,
 			DescriptorPool:      descriptorPool,
-			DescriptorSet:       vk.DescriptorSet{}, // Will be created on-demand
+			DescriptorSet:       descriptorSet,
 			DescriptorSetLayout: descriptorSetLayout,
 		})
 
-		// Add TextureData component (paint canvas)
+		// Add TextureData component (same texture)
 		world.AddTextureData(layer2, &ecs.TextureData{
-			Image:       paintCanvas.GetImage(),
-			ImageView:   paintCanvas.GetView(),
-			ImageMemory: vk.DeviceMemory{}, // Canvas manages its own memory,
-			Sampler:     canvasSampler,
-			Width:       paintCanvas.GetWidth(),
-			Height:      paintCanvas.GetHeight(),
+			Image:       textureImage,
+			ImageView:   textureImageView,
+			ImageMemory: textureMemory,
+			Sampler:     textureSampler,
+			Width:       imageData.Width,
+			Height:      imageData.Height,
 		})
 
 		// Add BlendMode component with different opacity
@@ -2105,9 +2133,6 @@ func main() {
 					VertexBuffer:  vertexBuffer,
 					IndexBuffer:   indexBuffer,
 					IndexCount:    uint32(len(indices)),
-				Device:              device,
-				DescriptorPool:      descriptorPool,
-				DescriptorSetLayout: descriptorSetLayout,
 				}
 				systems.RenderLayerContent(world, renderCtx, entity)
 
