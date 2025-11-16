@@ -218,6 +218,13 @@ func LoadImage(path string) (*ImageData, error) {
 	}, nil
 }
 
+// evaluateQuadraticBezier evaluates a quadratic Bezier curve at parameter t (0 to 1).
+// p0 = start point, p1 = control point, p2 = end point
+func evaluateQuadraticBezier(p0, p1, p2, t float32) float32 {
+	oneMinusT := 1.0 - t
+	return oneMinusT*oneMinusT*p0 + 2.0*oneMinusT*t*p1 + t*t*p2
+}
+
 func main() {
 
 	// Comment out if GTK won't initialize.
@@ -791,10 +798,10 @@ func main() {
 		// === Text Rendering Setup ===
 		// Quad vertices (2 triangles)
 		vertices := []Vertex{
-			{Pos: [2]float32{-0.5, -0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 0.0}}, // Bottom-left
-			{Pos: [2]float32{0.5, -0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 0.0}},  // Bottom-right
-			{Pos: [2]float32{0.5, 0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 1.0}},   // Top-right
-			{Pos: [2]float32{-0.5, 0.5}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 1.0}},  // Top-left
+			{Pos: [2]float32{-1.0, -1.0}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 0.0}}, // Bottom-left
+			{Pos: [2]float32{1.0, -1.0}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 0.0}},  // Bottom-right
+			{Pos: [2]float32{1.0, 1.0}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{1.0, 1.0}},   // Top-right
+			{Pos: [2]float32{-1.0, 1.0}, Color: [3]float32{1.0, 1.0, 1.0}, TexCoord: [2]float32{0.0, 1.0}},  // Top-left
 		}
 		indices := []uint16{0, 1, 2, 2, 3, 0}
 
@@ -1477,7 +1484,6 @@ func main() {
 		}
 		defer device.DestroyDescriptorPool(descriptorPool)
 
-
 		// Allocate command buffers (one per swapchain image)
 		commandBuffers, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
 			CommandPool:        commandPool,
@@ -1812,10 +1818,26 @@ func main() {
 		penY := float32(0.0)
 		prevPenX := float32(0.0)
 		prevPenY := float32(0.0)
+	prevPrevPenX := float32(0.0) // For Bezier control point calculation
+	prevPrevPenY := float32(0.0)
+	prevPrevPenPressure := float32(0.0)
+
+	// Brush settings
+	useBezierInterpolation := true // Toggle between linear and Bezier
 		penPressure := float32(0.0)
+		prevPenPressure := float32(0.0)
 		penDown := false
 
 		for running {
+
+			l2tx := world.GetTransform(layer2).X
+			l2ty := world.GetTransform(layer2).Y
+
+			elapsed := float32(time.Since(startTime).Seconds())
+			layer2Transform := world.GetTransform(layer2)
+			radius := float32(0.5)
+			layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
+			layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 
 			// Handle events
 			for event, ok := sdl.PollEvent(); ok; event, ok = sdl.PollEvent() {
@@ -1844,11 +1866,6 @@ func main() {
 			world.AddText(helloText, textComp)
 
 			// Animate layer2 in a circle
-			elapsed := float32(time.Since(startTime).Seconds())
-			layer2Transform := world.GetTransform(layer2)
-			radius := float32(0.5)
-			layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
-			layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 
 			// Oscillate layer2 opacity between 0.0 and 1.0
 			layer2Blend := world.GetBlendMode(layer2)
@@ -1874,14 +1891,20 @@ func main() {
 
 			// === PASS 0: Render brush strokes to canvas (if pen is down) ===
 			if penDown && penPressure > 0.01 {
-				// Map pen coordinates from screen space to canvas space
-				canvasX := penX * (float32(paintCanvas.GetWidth()) / float32(swapExtent.Width))
-				canvasY := penY * (float32(paintCanvas.GetHeight()) / float32(swapExtent.Height))
-			// Initialize previous position on first stroke to avoid interpolating from (0,0)
-			if prevPenX == 0.0 && prevPenY == 0.0 {
-				prevPenX = penX
-				prevPenY = penY
-			}
+				// Get layer2's transform to account for canvas position/scale
+				layer2Transform := world.GetTransform(layer2)
+
+				// Convert window pixel coordinates to clip space (-1 to 1)
+				clipX := (penX/float32(swapExtent.Width))*2.0 - 1.0
+				clipY := (penY/float32(swapExtent.Height))*2.0 - 1.0
+
+				// Apply inverse transform to get local clip coordinates
+				localClipX := (clipX - layer2Transform.X) / layer2Transform.ScaleX
+				localClipY := (clipY - layer2Transform.Y) / layer2Transform.ScaleX
+
+				// Convert from clip space (-1 to 1) to canvas pixel coordinates
+				canvasX := (localClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
+				canvasY := (localClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
 				// Transition canvas: SHADER_READ → COLOR_ATTACHMENT
 				cmd.PipelineBarrier(
@@ -1966,12 +1989,25 @@ func main() {
 				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
 
 				// Interpolate brush stamps between previous and current positions
-				prevCanvasX := prevPenX * (float32(paintCanvas.GetWidth()) / float32(swapExtent.Width))
-				prevCanvasY := prevPenY * (float32(paintCanvas.GetHeight()) / float32(swapExtent.Height))
+				// Apply same clip-space transformation to previous position
+				// Initialize previous position on first stroke to avoid interpolating from (0,0)
+				if prevPenX == 0.0 && prevPenY == 0.0 {
+					prevPenX = penX
+					prevPenY = penY
+					prevPenPressure = penPressure
+				}
+
+				prevClipX := (prevPenX/float32(swapExtent.Width))*2.0 - 1.0
+				prevClipY := (prevPenY/float32(swapExtent.Height))*2.0 - 1.0
+				prevLocalClipX := (prevClipX - l2tx) / layer2Transform.ScaleX
+				prevLocalClipY := (prevClipY - l2ty) / layer2Transform.ScaleX
+				prevCanvasX := (prevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
+				prevCanvasY := (prevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
 				// Calculate distance between previous and current positions
 				dx := canvasX - prevCanvasX
 				dy := canvasY - prevCanvasY
+				dp := penPressure - prevPenPressure
 				distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 
 				// Brush spacing (smaller = more stamps, smoother stroke)
@@ -1983,31 +2019,58 @@ func main() {
 				if steps < 1 {
 					steps = 1
 				}
+			// Calculate prevPrev canvas positions for Bezier control points
+			prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
+			prevPrevClipY := (prevPrevPenY/float32(swapExtent.Height))*2.0 - 1.0
+			prevPrevLocalClipX := (prevPrevClipX - l2tx) / layer2Transform.ScaleX
+			prevPrevLocalClipY := (prevPrevClipY - l2ty) / layer2Transform.ScaleX
+			prevPrevCanvasX := (prevPrevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
+			prevPrevCanvasY := (prevPrevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
-				// Render brush stamps along interpolated path
-				for i := 0; i <= steps; i++ {
-					t := float32(i) / float32(steps)
-					interpX := prevCanvasX + dx*t
-					interpY := prevCanvasY + dy*t
+			// Calculate Bezier control points based on stroke direction
+			controlX := prevCanvasX
+			controlY := prevCanvasY
+			controlP := prevPenPressure
+			
+			if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
+				controlX = prevCanvasX + (prevCanvasX - prevPrevCanvasX) * 0.25
+				controlY = prevCanvasY + (prevCanvasY - prevPrevCanvasY) * 0.25
+				controlP = prevPenPressure + (prevPenPressure - prevPrevPenPressure) * 0.25
+			}
 
-					pushConstants := BrushPushConstants{
-						CanvasWidth:  float32(paintCanvas.GetWidth()),
-						CanvasHeight: float32(paintCanvas.GetHeight()),
-						BrushX:       interpX,
-						BrushY:       interpY,
-						BrushSize:    brushRadius * penPressure,
-						BrushOpacity: 1.0,
-						ColorR:       1.0, // Red
-						ColorG:       0.0,
-						ColorB:       0.0,
-						ColorA:       1.0,
-					}
-
-					cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
-
-					// Draw brush quad
-					cmd.Draw(6, 1, 0, 0)
+			// Render brush stamps along interpolated path
+			for i := 0; i <= steps; i++ {
+				t := float32(i) / float32(steps)
+				
+				var interpX, interpY, interpP float32
+				if useBezierInterpolation && (prevPrevPenX != 0.0 || prevPrevPenY != 0.0) {
+					// Quadratic Bezier interpolation
+					interpX = evaluateQuadraticBezier(prevCanvasX, controlX, canvasX, t)
+					interpY = evaluateQuadraticBezier(prevCanvasY, controlY, canvasY, t)
+					interpP = evaluateQuadraticBezier(prevPenPressure, controlP, penPressure, t)
+				} else {
+					// Linear interpolation (fallback)
+					interpX = prevCanvasX + dx*t
+					interpY = prevCanvasY + dy*t
+					interpP = prevPenPressure + dp*t
 				}
+
+				pushConstants := BrushPushConstants{
+					CanvasWidth:  float32(paintCanvas.GetWidth()),
+					CanvasHeight: float32(paintCanvas.GetHeight()),
+					BrushX:       interpX,
+					BrushY:       interpY,
+					BrushSize:    brushRadius * interpP,
+					BrushOpacity: 1.0,
+					ColorR:       1.0,
+					ColorG:       0.0,
+					ColorB:       0.0,
+					ColorA:       1.0,
+				}
+
+				cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
+				cmd.Draw(6, 1, 0, 0)
+			}
 
 				cmd.EndRendering()
 
@@ -2035,14 +2098,22 @@ func main() {
 						},
 					},
 				)
-			// Update previous position for next frame
-			prevPenX = penX
-			prevPenY = penY
+				// Update previous position for next frame
+				prevPrevPenX = prevPenX
+				prevPrevPenY = prevPenY
+				prevPrevPenPressure = prevPenPressure
+				prevPenX = penX
+				prevPenY = penY
+				prevPenPressure = penPressure
 			} else {
-			// Reset previous position when pen is up to prevent interpolation between strokes
-			prevPenX = 0.0
-			prevPenY = 0.0
-		}
+				// Reset previous position when pen is up to prevent interpolation between strokes
+				prevPenX = 0.0
+				prevPenY = 0.0
+				prevPenPressure = 0.0
+				prevPrevPenX = 0.0
+				prevPrevPenY = 0.0
+				prevPrevPenPressure = 0.0
+			}
 
 			// ===  PASS 1: Render each layer to its framebuffer ===
 			for _, entity := range sortedLayers {
@@ -2100,14 +2171,14 @@ func main() {
 
 				// Render layer content
 				renderCtx := &systems.RenderContext{
-					CommandBuffer: cmd,
-					SwapExtent:    swapExtent,
-					VertexBuffer:  vertexBuffer,
-					IndexBuffer:   indexBuffer,
-					IndexCount:    uint32(len(indices)),
-				Device:              device,
-				DescriptorPool:      descriptorPool,
-				DescriptorSetLayout: descriptorSetLayout,
+					CommandBuffer:       cmd,
+					SwapExtent:          swapExtent,
+					VertexBuffer:        vertexBuffer,
+					IndexBuffer:         indexBuffer,
+					IndexCount:          uint32(len(indices)),
+					Device:              device,
+					DescriptorPool:      descriptorPool,
+					DescriptorSetLayout: descriptorSetLayout,
 				}
 				systems.RenderLayerContent(world, renderCtx, entity)
 
@@ -2347,11 +2418,13 @@ func main() {
 				Swapchains:     []vk.SwapchainKHR{swapchain},
 				ImageIndices:   []uint32{imageIndex},
 			})
+
+			//sdl.Delay(5)
+
 		}
 
 		// Wait for device to finish
 		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 
-		sdl.Delay(5)
 	}
 }
