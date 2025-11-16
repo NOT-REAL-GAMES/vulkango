@@ -18,7 +18,8 @@ type DescriptorSet struct {
 
 // Descriptor Set Layout
 type DescriptorSetLayoutCreateInfo struct {
-	Bindings []DescriptorSetLayoutBinding
+	Bindings      []DescriptorSetLayoutBinding
+	BindingFlags  []DescriptorBindingFlagBits // Optional: per-binding flags for descriptor indexing
 }
 
 type DescriptorSetLayoutBinding struct {
@@ -46,6 +47,29 @@ func (device Device) CreateDescriptorSetLayout(createInfo *DescriptorSetLayoutCr
 	cInfo.sType = C.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
 	cInfo.pNext = nil
 	cInfo.flags = 0
+
+	// Handle binding flags if provided (for descriptor indexing)
+	var bindingFlagsInfo *C.VkDescriptorSetLayoutBindingFlagsCreateInfo
+	var cBindingFlags []C.VkDescriptorBindingFlags
+
+	if len(createInfo.BindingFlags) > 0 {
+		bindingFlagsInfo = (*C.VkDescriptorSetLayoutBindingFlagsCreateInfo)(
+			C.calloc(1, C.sizeof_VkDescriptorSetLayoutBindingFlagsCreateInfo))
+		defer C.free(unsafe.Pointer(bindingFlagsInfo))
+
+		bindingFlagsInfo.sType = C.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO
+		bindingFlagsInfo.pNext = nil
+
+		cBindingFlags = make([]C.VkDescriptorBindingFlags, len(createInfo.BindingFlags))
+		for i, flags := range createInfo.BindingFlags {
+			cBindingFlags[i] = C.VkDescriptorBindingFlags(flags)
+		}
+
+		bindingFlagsInfo.bindingCount = C.uint32_t(len(cBindingFlags))
+		bindingFlagsInfo.pBindingFlags = &cBindingFlags[0]
+
+		cInfo.pNext = unsafe.Pointer(bindingFlagsInfo)
+	}
 
 	var bindings []C.VkDescriptorSetLayoutBinding
 	if len(createInfo.Bindings) > 0 {

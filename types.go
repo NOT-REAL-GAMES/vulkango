@@ -1428,6 +1428,7 @@ type DeviceCreateInfo struct {
 	QueueCreateInfos      []DeviceQueueCreateInfo
 	EnabledLayerNames     []string
 	EnabledExtensionNames []string
+	Vulkan12Features      *PhysicalDeviceVulkan12Features
 	Vulkan13Features      *PhysicalDeviceVulkan13Features
 }
 
@@ -1748,6 +1749,13 @@ type PipelineRenderingCreateInfo struct {
 	StencilAttachmentFormat Format
 }
 
+type PhysicalDeviceVulkan12Features struct {
+	DescriptorIndexing                  bool
+	ShaderSampledImageArrayNonUniformIndexing bool
+	DescriptorBindingPartiallyBound       bool
+	RuntimeDescriptorArray                bool
+}
+
 type PhysicalDeviceVulkan13Features struct {
 	DynamicRendering bool
 }
@@ -1784,3 +1792,22 @@ const (
 	FORMAT_R8G8B8_SRGB         Format = C.VK_FORMAT_R8G8B8_SRGB
 	FORMAT_R16G16B16A16_SFLOAT Format = C.VK_FORMAT_R16G16B16A16_SFLOAT
 )
+
+// Descriptor binding flags for descriptor indexing
+type DescriptorBindingFlagBits uint32
+
+const (
+	DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT          DescriptorBindingFlagBits = C.VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+	DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT DescriptorBindingFlagBits = C.VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
+	DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT            DescriptorBindingFlagBits = C.VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+	DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT  DescriptorBindingFlagBits = C.VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
+)
+
+// Physical device properties
+type PhysicalDeviceLimits struct {
+	MaxDescriptorSetSampledImages uint32
+}
+
+type PhysicalDeviceProperties struct {
+	Limits PhysicalDeviceLimits
+}

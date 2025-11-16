@@ -81,12 +81,13 @@ func NewBlendMode() *BlendMode {
 // TextureData component holds texture information for a layer.
 // This is the actual image data that gets rendered.
 type TextureData struct {
-	Image       vk.Image          // Texture image
-	ImageView   vk.ImageView      // Texture image view
-	ImageMemory vk.DeviceMemory   // Texture memory
-	Sampler     vk.Sampler        // Texture sampler
-	Width       uint32            // Texture width
-	Height      uint32            // Texture height
+	Image        vk.Image        // Texture image
+	ImageView    vk.ImageView    // Texture image view
+	ImageMemory  vk.DeviceMemory // Texture memory
+	Sampler      vk.Sampler      // Texture sampler
+	Width        uint32          // Texture width
+	Height       uint32          // Texture height
+	TextureIndex uint32          // Index in global bindless texture array
 }
 
 // BufferData component holds vertex and index buffers for a layer.

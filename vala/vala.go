@@ -90,30 +90,44 @@ vec2 texCoords[6] = vec2[](
     vec2(0.0, 1.0)
 );
 
+// Push constants for layer transform
+layout(push_constant) uniform LayerPushConstants {
+    float opacity;       // Layer opacity (0.0 to 1.0)
+    uint textureIndex;   // Index into bindless texture array
+    vec2 offset;         // Layer position offset
+    float scale;         // Layer scale
+} layer;
+
 layout(location = 0) out vec2 fragTexCoord;
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+    // Apply transform to quad vertices
+    vec2 pos = positions[gl_VertexIndex] * layer.scale + layer.offset;
+    gl_Position = vec4(pos, 0.0, 1.0);
     fragTexCoord = texCoords[gl_VertexIndex];
 }
 `
 
 const compositeFragmentShader = `
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(location = 0) in vec2 fragTexCoord;
 
-layout(binding = 0) uniform sampler2D layerTexture;
+// BINDLESS: Array of ALL textures!
+layout(binding = 0) uniform sampler2D textures[];
 
-// Push constant for layer opacity
+// Push constant for layer opacity and texture index
 layout(push_constant) uniform LayerPushConstants {
-    float opacity; // Layer opacity (0.0 to 1.0)
+    float opacity;       // Layer opacity (0.0 to 1.0)
+    uint textureIndex;   // Index into bindless texture array
 } layer;
 
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    vec4 texColor = texture(layerTexture, fragTexCoord);
+    // Sample from bindless texture array using nonuniformEXT
+    vec4 texColor = texture(textures[nonuniformEXT(layer.textureIndex)], fragTexCoord);
     // Apply layer opacity to the alpha channel
     outColor = vec4(texColor.rgb, texColor.a * layer.opacity);
 }
@@ -239,8 +253,9 @@ func CreateImageLayer(
 	pipelineLayout *vk.PipelineLayout,
 	descriptorPool *vk.DescriptorPool,
 	descriptorSetLayout *vk.DescriptorSetLayout,
-	compositeDescriptorPool vk.DescriptorPool,
-	compositeDescriptorSetLayout vk.DescriptorSetLayout,
+	globalBindlessDescriptorSet vk.DescriptorSet,
+	nextTextureIndex *uint32,
+	maxTextures uint32,
 	layerSampler vk.Sampler,
 	swapExtent vk.Extent2D,
 	imagePath string,
@@ -498,7 +513,7 @@ func CreateImageLayer(
 		Height:      swapExtent.Height,
 	})
 
-	// Transition RenderTarget image to COLOR_ATTACHMENT_OPTIMAL
+	// Transition RenderTarget image to SHADER_READ_ONLY_OPTIMAL for compositing
 	transitionCmd, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
 		CommandPool:        *commandPool,
 		Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -512,13 +527,13 @@ func CreateImageLayer(
 	cmd.Begin(&vk.CommandBufferBeginInfo{Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT})
 	cmd.PipelineBarrier(
 		vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		0,
 		[]vk.ImageMemoryBarrier{{
 			SrcAccessMask:       vk.ACCESS_NONE,
-			DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
 			OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
-			NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 			SrcQueueFamilyIndex: ^uint32(0),
 			DstQueueFamilyIndex: ^uint32(0),
 			Image:               layerImage,
@@ -540,36 +555,33 @@ func CreateImageLayer(
 	queue.WaitIdle()
 	device.FreeCommandBuffers(*commandPool, []vk.CommandBuffer{cmd})
 
-	// Create composite descriptor set for this layer
-	compositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
-		DescriptorPool: compositeDescriptorPool,
-		SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
-	})
-	if err != nil {
-		return entity, fmt.Errorf("failed to allocate composite descriptor set: %v", err)
+	// BINDLESS: Assign texture index and upload to global descriptor set
+	textureIndex := *nextTextureIndex
+	*nextTextureIndex++
+	if *nextTextureIndex >= maxTextures {
+		return entity, fmt.Errorf("exceeded maximum texture count: %d", maxTextures)
 	}
-	compositeDescSet := compositeSets[0]
+	fmt.Printf("Assigned texture index %d to new layer\n", textureIndex)
 
-	// Update composite descriptor set to bind layer's framebuffer texture
+	// Upload SOURCE TEXTURE to global bindless descriptor set
+	// (For simple image layers, we composite the source directly, not a rendered framebuffer)
 	device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
 		{
-			DstSet:          compositeDescSet,
+			DstSet:          globalBindlessDescriptorSet,
 			DstBinding:      0,
-			DstArrayElement: 0,
+			DstArrayElement: textureIndex,
 			DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-			ImageInfo: []vk.DescriptorImageInfo{
-				{
-					Sampler:     layerSampler,
-					ImageView:   layerImageView,
-					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-				},
-			},
+			ImageInfo: []vk.DescriptorImageInfo{{
+				Sampler:     textureSampler,
+				ImageView:   textureImageView,
+				ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			}},
 		},
 	})
 
-	// Update VulkanPipeline with composite descriptor set
-	layerPipeline := world.GetVulkanPipeline(entity)
-	layerPipeline.CompositeDescriptorSet = compositeDescSet
+	// Update TextureData with texture index
+	texData := world.GetTextureData(entity)
+	texData.TextureIndex = textureIndex
 
 	fmt.Printf("Created layer entity %d from %s\n", entity, imagePath)
 	return entity, nil
@@ -709,6 +721,12 @@ func main() {
 				"VK_KHR_swapchain",
 				"VK_EXT_blend_operation_advanced",
 			},
+			Vulkan12Features: &vk.PhysicalDeviceVulkan12Features{
+				DescriptorIndexing:                        true, // Enable descriptor indexing for bindless textures
+				ShaderSampledImageArrayNonUniformIndexing: true, // Allow nonuniformEXT in shaders
+				DescriptorBindingPartiallyBound:           true, // Allow partially bound descriptor sets
+				RuntimeDescriptorArray:                    true, // Enable runtime-sized descriptor arrays
+			},
 			Vulkan13Features: &vk.PhysicalDeviceVulkan13Features{
 				DynamicRendering: true, // ENABLE IT!
 			},
@@ -799,14 +817,33 @@ func main() {
 
 		fmt.Println("\nShaders compiled and modules created!")
 
+		// Query device limits for bindless textures
+		deviceProps := instance.GetPhysicalDeviceProperties(physicalDevice)
+		gpuLimit := deviceProps.Limits.MaxDescriptorSetSampledImages
+
+		// Cap at 16K for cross-platform compatibility (Windows WDDM can be restrictive)
+		// Most apps won't need more than a few thousand textures anyway
+		const maxTexturesCap = 16384
+		maxTextures := gpuLimit
+		if maxTextures > maxTexturesCap {
+			maxTextures = maxTexturesCap
+		}
+
+		fmt.Printf("\n🎨 BINDLESS TEXTURES ENABLED!\n")
+		fmt.Printf("GPU reports %d sampled images, using %d (capped for compatibility)\n", gpuLimit, maxTextures)
+
+		// Create BINDLESS descriptor set layout (one binding = ARRAY of all textures!)
 		descriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
 					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					DescriptorCount: 1,
+					DescriptorCount: maxTextures, // THE ENTIRE ARRAY!
 					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
 				},
+			},
+			BindingFlags: []vk.DescriptorBindingFlagBits{
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Allow unbound array elements
 			},
 		})
 		if err != nil {
@@ -819,9 +856,9 @@ func main() {
 			SetLayouts: []vk.DescriptorSetLayout{descriptorSetLayout},
 			PushConstantRanges: []vk.PushConstantRange{
 				{
-					StageFlags: vk.SHADER_STAGE_VERTEX_BIT,
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
 					Offset:     0,
-					Size:       20, // vec2 (8 bytes) + float (4) + float (4) + float (4) = 20 bytes
+					Size:       24, // vec2 (8) + float (4) + float (4) + float (4) + uint (4) = 24 bytes
 				},
 			},
 		})
@@ -920,15 +957,18 @@ func main() {
 		}
 		defer device.DestroyShaderModule(compositeFragShader)
 
-		// Create composite descriptor set layout
+		// Create composite descriptor set layout (BINDLESS!)
 		compositeDescriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
 					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					DescriptorCount: 1,
+					DescriptorCount: maxTextures, // Entire bindless array!
 					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
 				},
+			},
+			BindingFlags: []vk.DescriptorBindingFlagBits{
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Allow unbound array elements
 			},
 		})
 		if err != nil {
@@ -941,9 +981,9 @@ func main() {
 			SetLayouts: []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
 			PushConstantRanges: []vk.PushConstantRange{
 				{
-					StageFlags: vk.SHADER_STAGE_FRAGMENT_BIT,
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
 					Offset:     0,
-					Size:       4, // sizeof(float) for opacity
+					Size:       20, // opacity(4) + textureIndex(4) + offset(8) + scale(4) = 20 bytes
 				},
 			},
 		})
@@ -1118,18 +1158,40 @@ func main() {
 
 		fmt.Println("Brush pipeline created!")
 
-		// Create descriptor pool for composite pass (100 sets to support dynamic layer creation)
-		compositeDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
-			MaxSets: 100,
+		// Create BINDLESS descriptor pool (1 set with ALL texture slots!)
+		fmt.Printf("Creating bindless descriptor pool: 1 set × %d textures\n", maxTextures)
+		bindlessDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			MaxSets: 1, // Only ONE descriptor set needed for bindless!
 			PoolSizes: []vk.DescriptorPoolSize{
-				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: 100},
+				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: maxTextures},
 			},
 		})
 		if err != nil {
 			panic(err)
 		}
-		defer device.DestroyDescriptorPool(compositeDescriptorPool)
+		defer device.DestroyDescriptorPool(bindlessDescriptorPool)
 
+		// Allocate THE global bindless descriptor set
+		bindlessDescriptorSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+			DescriptorPool: bindlessDescriptorPool,
+			SetLayouts:     []vk.DescriptorSetLayout{descriptorSetLayout},
+		})
+		if err != nil {
+			panic(err)
+		}
+		globalBindlessDescriptorSet := bindlessDescriptorSets[0]
+		fmt.Printf("✨ Global bindless descriptor set allocated!\n\n")
+
+		// Texture index management for bindless rendering
+		var nextTextureIndex uint32 = 0
+		assignNextTextureIndex := func() uint32 {
+			idx := nextTextureIndex
+			nextTextureIndex++
+			if nextTextureIndex >= maxTextures {
+				panic(fmt.Sprintf("Exceeded maximum texture count: %d", maxTextures))
+			}
+			return idx
+		}
 		// Create sampler for layer textures
 		layerSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
 			MagFilter:    vk.FILTER_LINEAR,
@@ -1878,7 +1940,7 @@ func main() {
 
 		// Add Transform component
 		transform1 := ecs.NewTransform()
-		transform1.ZIndex = -50 // Layer 1 is in the back
+		transform1.ZIndex = -5000000 // Layer 1 is in the back
 		world.AddTransform(layer1, transform1)
 
 		// Add VulkanPipeline component
@@ -1891,13 +1953,33 @@ func main() {
 		})
 
 		// Add TextureData component (Djungelskog texture)
+		// Assign bindless texture index for layer1
+		layer1TextureIndex := assignNextTextureIndex()
+		fmt.Printf("Assigned texture index %d to layer1\n", layer1TextureIndex)
+
+		// Upload texture to global bindless descriptor set
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          globalBindlessDescriptorSet,
+				DstBinding:      0,
+				DstArrayElement: layer1TextureIndex,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{{
+					Sampler:     textureSampler,
+					ImageView:   textureImageView,
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				}},
+			},
+		})
+
 		world.AddTextureData(layer1, &ecs.TextureData{
-			Image:       textureImage,
-			ImageView:   textureImageView,
-			ImageMemory: textureMemory,
-			Sampler:     textureSampler,
-			Width:       imageData.Width,
-			Height:      imageData.Height,
+			Image:        textureImage,
+			ImageView:    textureImageView,
+			ImageMemory:  textureMemory,
+			Sampler:      textureSampler,
+			Width:        imageData.Width,
+			Height:       imageData.Height,
+			TextureIndex: layer1TextureIndex, // Bindless texture array index
 		})
 
 		// Add BlendMode component (visible, opaque)
@@ -1949,35 +2031,35 @@ func main() {
 		})
 
 		// Create composite descriptor set for layer 1
-		layer1CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
-			DescriptorPool: compositeDescriptorPool,
-			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
-		})
-		if err != nil {
-			panic(fmt.Sprintf("Failed to allocate layer 1 composite descriptor set: %v", err))
-		}
-		layer1CompositeDescSet := layer1CompositeSets[0]
+		// BINDLESS: 		layer1CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+		// BINDLESS: 			DescriptorPool: compositeDescriptorPool,
+		// BINDLESS: 			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
+		// BINDLESS: 		})
+		// BINDLESS: 		if err != nil {
+		// BINDLESS: 			panic(fmt.Sprintf("Failed to allocate layer 1 composite descriptor set: %v", err))
+		// BINDLESS: 		}
+		// BINDLESS: 		layer1CompositeDescSet := layer1CompositeSets[0]
+		// BINDLESS:
+		// BINDLESS: 		// Update descriptor set to bind layer1's framebuffer texture
+		// BINDLESS: 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		// BINDLESS: 			{
+		// BINDLESS: 				DstSet:          layer1CompositeDescSet,
+		// BINDLESS: 				DstBinding:      0,
+		// BINDLESS: 				DstArrayElement: 0,
+		// BINDLESS: 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		// BINDLESS: 				ImageInfo: []vk.DescriptorImageInfo{
+		// BINDLESS: 					{
+		// BINDLESS: 						Sampler:     layerSampler,
+		// BINDLESS: 						ImageView:   layer1ImageView,
+		// BINDLESS: 						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		// BINDLESS: 					},
+		// BINDLESS: 				},
+		// BINDLESS: 			},
+		// BINDLESS: 		})
 
-		// Update descriptor set to bind layer1's framebuffer texture
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
-			{
-				DstSet:          layer1CompositeDescSet,
-				DstBinding:      0,
-				DstArrayElement: 0,
-				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				ImageInfo: []vk.DescriptorImageInfo{
-					{
-						Sampler:     layerSampler,
-						ImageView:   layer1ImageView,
-						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					},
-				},
-			},
-		})
-
-		// Update layer1's VulkanPipeline with composite descriptor set
-		layer1Pipeline := world.GetVulkanPipeline(layer1)
-		layer1Pipeline.CompositeDescriptorSet = layer1CompositeDescSet
+	// BINDLESS: 		// Update layer1's VulkanPipeline with composite descriptor set
+	// BINDLESS: 		layer1Pipeline := world.GetVulkanPipeline(layer1)
+	// BINDLESS: 		layer1Pipeline.CompositeDescriptorSet = layer1CompositeDescSet
 
 		// Create a second layer entity (demonstrating multi-layer support)
 		layer2 := world.CreateEntity()
@@ -1998,13 +2080,33 @@ func main() {
 		})
 
 		// Add TextureData component (paint canvas)
+		// Assign bindless texture index for layer2
+		layer2TextureIndex := assignNextTextureIndex()
+		fmt.Printf("Assigned texture index %d to layer2\n", layer2TextureIndex)
+
+		// Upload texture to global bindless descriptor set
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          globalBindlessDescriptorSet,
+				DstBinding:      0,
+				DstArrayElement: layer2TextureIndex,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{{
+					Sampler:     canvasSampler,
+					ImageView:   paintCanvas.GetView(),
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				}},
+			},
+		})
+
 		world.AddTextureData(layer2, &ecs.TextureData{
-			Image:       paintCanvas.GetImage(),
-			ImageView:   paintCanvas.GetView(),
-			ImageMemory: vk.DeviceMemory{}, // Canvas manages its own memory,
-			Sampler:     canvasSampler,
-			Width:       paintCanvas.GetWidth(),
-			Height:      paintCanvas.GetHeight(),
+			Image:        paintCanvas.GetImage(),
+			ImageView:    paintCanvas.GetView(),
+			ImageMemory:  vk.DeviceMemory{}, // Canvas manages its own memory,
+			Sampler:      canvasSampler,
+			Width:        paintCanvas.GetWidth(),
+			Height:       paintCanvas.GetHeight(),
+			TextureIndex: layer2TextureIndex, // Bindless texture array index
 		})
 
 		// Add BlendMode component with different opacity
@@ -2055,35 +2157,35 @@ func main() {
 			Height:      swapExtent.Height,
 		})
 		// Create composite descriptor set for layer 2
-		layer2CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
-			DescriptorPool: compositeDescriptorPool,
-			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
-		})
-		if err != nil {
-			panic(fmt.Sprintf("Failed to allocate layer 2 composite descriptor set: %v", err))
-		}
-		layer2CompositeDescSet := layer2CompositeSets[0]
+		// BINDLESS: 		layer2CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+		// BINDLESS: 			DescriptorPool: compositeDescriptorPool,
+		// BINDLESS: 			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
+		// BINDLESS: 		})
+		// BINDLESS: 		if err != nil {
+		// BINDLESS: 			panic(fmt.Sprintf("Failed to allocate layer 2 composite descriptor set: %v", err))
+		// BINDLESS: 		}
+		// BINDLESS: 		layer2CompositeDescSet := layer2CompositeSets[0]
+		// BINDLESS:
+		// BINDLESS: 		// Update descriptor set to bind layer2's framebuffer texture
+		// BINDLESS: 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		// BINDLESS: 			{
+		// BINDLESS: 				DstSet:          layer2CompositeDescSet,
+		// BINDLESS: 				DstBinding:      0,
+		// BINDLESS: 				DstArrayElement: 0,
+		// BINDLESS: 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		// BINDLESS: 				ImageInfo: []vk.DescriptorImageInfo{
+		// BINDLESS: 					{
+		// BINDLESS: 						Sampler:     layerSampler,
+		// BINDLESS: 						ImageView:   layer2ImageView,
+		// BINDLESS: 						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		// BINDLESS: 					},
+		// BINDLESS: 				},
+		// BINDLESS: 			},
+		// BINDLESS: 		})
 
-		// Update descriptor set to bind layer2's framebuffer texture
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
-			{
-				DstSet:          layer2CompositeDescSet,
-				DstBinding:      0,
-				DstArrayElement: 0,
-				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-				ImageInfo: []vk.DescriptorImageInfo{
-					{
-						Sampler:     layerSampler,
-						ImageView:   layer2ImageView,
-						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					},
-				},
-			},
-		})
-
-		// Update layer2's VulkanPipeline with composite descriptor set
-		layer2Pipeline := world.GetVulkanPipeline(layer2)
-		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
+	// BINDLESS: 		// Update layer2's VulkanPipeline with composite descriptor set
+	// BINDLESS: 		layer2Pipeline := world.GetVulkanPipeline(layer2)
+	// BINDLESS: 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
 
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
@@ -2178,7 +2280,7 @@ func main() {
 		prevPenPressure := float32(0.0)
 		penDown := false
 
-		currentLayer := 0
+		currentLayer := -4999999
 
 		for running {
 
@@ -2231,8 +2333,9 @@ func main() {
 							&pipelineLayout,
 							&descriptorPool,
 							&descriptorSetLayout,
-							compositeDescriptorPool,
-							compositeDescriptorSetLayout,
+							globalBindlessDescriptorSet,
+							&nextTextureIndex,
+							maxTextures,
 							layerSampler,
 							swapExtent,
 							filePath,
@@ -2649,19 +2752,38 @@ func main() {
 				},
 			})
 
-			// Composite each layer
+			// Composite each layer using BINDLESS textures
 			compositeCtx := &systems.CompositeContext{
 				CommandBuffer:           cmd,
 				CompositePipeline:       compositePipeline,
 				CompositePipelineLayout: compositePipelineLayout,
 				SwapExtent:              swapExtent,
+				BindlessDescriptorSet:   globalBindlessDescriptorSet,
 			}
 
+			// BIND GLOBAL BINDLESS DESCRIPTOR SET ONCE!
+			cmd.BindDescriptorSets(
+				vk.PIPELINE_BIND_POINT_GRAPHICS,
+				compositePipelineLayout,
+				0,
+				[]vk.DescriptorSet{globalBindlessDescriptorSet},
+				nil,
+			)
+
+			// Composite each layer (push texture index per layer)
 			for _, entity := range sortedLayers {
-				pipeline := world.GetVulkanPipeline(entity)
+				textureData := world.GetTextureData(entity)
 				blendMode := world.GetBlendMode(entity)
-				if pipeline != nil && blendMode != nil {
-					systems.CompositeLayer(compositeCtx, pipeline.CompositeDescriptorSet, blendMode.Opacity)
+				transform := world.GetTransform(entity)
+				if textureData != nil && blendMode != nil && transform != nil {
+					systems.CompositeLayer(
+						compositeCtx,
+						textureData.TextureIndex,
+						blendMode.Opacity,
+						transform.X,
+						transform.Y,
+						transform.ScaleX,
+					)
 				}
 			}
 
@@ -2809,7 +2931,7 @@ func main() {
 				ImageIndices:   []uint32{imageIndex},
 			})
 
-			//sdl.Delay(5)
+			sdl.Delay(5)
 
 		}
 

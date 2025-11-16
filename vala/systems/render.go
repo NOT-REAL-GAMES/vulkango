@@ -1,6 +1,7 @@
 package systems
 
 import (
+	"math"
 	"unsafe"
 
 	vk "github.com/NOT-REAL-GAMES/vulkango"
@@ -236,6 +237,25 @@ func EndFrame(cmd vk.CommandBuffer, swapImage vk.Image) {
 	)
 }
 
+// zIndexToDepth converts ZIndex to depth using IEEE 754 bit manipulation.
+// This packs the ZIndex directly into the float32 mantissa bits for maximum precision.
+// Supports range: -8,388,608 to +8,388,607 (2^23 values) with perfect separation.
+func zIndexToDepth(zindex int) float32 {
+	// Flip sign bit so negative values map to lower depths (back)
+	// This ensures: negative ZIndex → [0, 0.5), positive ZIndex → [0.5, 1.0)
+	u := uint32(zindex) ^ 0x80000000
+
+	// Take top 23 bits for float32 mantissa
+	mantissa := u >> 9
+
+	// Construct IEEE 754 float in range [1.0, 2.0) then subtract 1.0 for [0.0, 1.0)
+	// Exponent = 127 (bias for 2^0 = 1.0)
+	bits := (127 << 23) | mantissa
+	depth := math.Float32frombits(bits) - 1.0
+
+	return depth
+}
+
 // RenderLayerContent renders a single layer's content to its own framebuffer.
 // This is called during Pass 1 (layer rendering).
 func RenderLayerContent(world *ecs.World, ctx *RenderContext, entity ecs.Entity) {
@@ -275,7 +295,11 @@ func RenderLayerContent(world *ecs.World, ctx *RenderContext, entity ecs.Entity)
 	if blend != nil {
 		opacity = blend.Opacity
 	}
-	depth := 0.5 - float32(transform.ZIndex)*0.01
+
+	// IEEE 754 bit-hack: Map ZIndex directly to depth using mantissa bits
+	// Supports 2^23 = 8,388,608 distinct layers with perfect precision
+	// Higher ZIndex = closer to camera (lower depth value)
+	depth := zIndexToDepth(transform.ZIndex)
 
 	pushData := PushConstants{
 		OffsetX: transform.X,
@@ -322,34 +346,40 @@ func RenderLayerContent(world *ecs.World, ctx *RenderContext, entity ecs.Entity)
 
 // CompositeContext holds data needed for the composite pass.
 type CompositeContext struct {
-	CommandBuffer           vk.CommandBuffer
-	CompositePipeline       vk.Pipeline
-	CompositePipelineLayout vk.PipelineLayout
-	SwapExtent              vk.Extent2D
+	CommandBuffer            vk.CommandBuffer
+	CompositePipeline        vk.Pipeline
+	CompositePipelineLayout  vk.PipelineLayout
+	SwapExtent               vk.Extent2D
+	BindlessDescriptorSet    vk.DescriptorSet // Global bindless texture array
 }
 
-// CompositeLayer draws a single layer's framebuffer to the swapchain.
+// CompositeLayer draws a single layer's framebuffer to the swapchain using BINDLESS textures.
 // This is called during Pass 2 (compositing).
-func CompositeLayer(ctx *CompositeContext, layerDescriptorSet vk.DescriptorSet, opacity float32) {
+func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX, offsetY, scale float32) {
 	// Bind composite pipeline
 	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, ctx.CompositePipeline)
 
-	// Bind layer's framebuffer texture
-	ctx.CommandBuffer.BindDescriptorSets(
-		vk.PIPELINE_BIND_POINT_GRAPHICS,
-		ctx.CompositePipelineLayout,
-		0,
-		[]vk.DescriptorSet{layerDescriptorSet},
-		nil,
-	)
-
-	// Set push constants for layer opacity
+	// Push constants for layer transform, opacity, and texture index
+	type PushConstants struct {
+		Opacity      float32
+		TextureIndex uint32
+		OffsetX      float32
+		OffsetY      float32
+		Scale        float32
+	}
+	pushData := PushConstants{
+		Opacity:      opacity,
+		TextureIndex: textureIndex,
+		OffsetX:      offsetX,
+		OffsetY:      offsetY,
+		Scale:        scale,
+	}
 	ctx.CommandBuffer.CmdPushConstants(
 		ctx.CompositePipelineLayout,
-		vk.SHADER_STAGE_FRAGMENT_BIT,
+		vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
 		0,
-		4, // sizeof(float32)
-		unsafe.Pointer(&opacity),
+		20, // opacity(4) + textureIndex(4) + offsetX(4) + offsetY(4) + scale(4) = 20 bytes
+		unsafe.Pointer(&pushData),
 	)
 
 	// Set viewport

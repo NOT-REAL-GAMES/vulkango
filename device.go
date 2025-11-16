@@ -58,6 +58,7 @@ type deviceCreateData struct {
 	queuePriorities  [][]C.float
 	layers           []*C.char
 	extensions       []*C.char
+	features12       *C.VkPhysicalDeviceVulkan12Features
 	features13       *C.VkPhysicalDeviceVulkan13Features
 }
 
@@ -112,14 +113,41 @@ func (info *DeviceCreateInfo) vulkanize() *deviceCreateData {
 		data.cInfo.ppEnabledExtensionNames = &data.extensions[0]
 	}
 
+	// Chain feature structures if needed
+	var pNext unsafe.Pointer = nil
+
+	// Setup Vulkan 1.3 features
 	if info.Vulkan13Features != nil && info.Vulkan13Features.DynamicRendering {
 		data.features13 = (*C.VkPhysicalDeviceVulkan13Features)(C.calloc(1, C.sizeof_VkPhysicalDeviceVulkan13Features))
 		data.features13.sType = C.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES
-		data.features13.pNext = nil
+		data.features13.pNext = pNext
 		data.features13.dynamicRendering = C.VK_TRUE
-
-		data.cInfo.pNext = unsafe.Pointer(data.features13)
+		pNext = unsafe.Pointer(data.features13)
 	}
+
+	// Setup Vulkan 1.2 features (descriptor indexing)
+	if info.Vulkan12Features != nil {
+		data.features12 = (*C.VkPhysicalDeviceVulkan12Features)(C.calloc(1, C.sizeof_VkPhysicalDeviceVulkan12Features))
+		data.features12.sType = C.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+		data.features12.pNext = pNext
+
+		if info.Vulkan12Features.DescriptorIndexing {
+			data.features12.descriptorIndexing = C.VK_TRUE
+		}
+		if info.Vulkan12Features.ShaderSampledImageArrayNonUniformIndexing {
+			data.features12.shaderSampledImageArrayNonUniformIndexing = C.VK_TRUE
+		}
+		if info.Vulkan12Features.DescriptorBindingPartiallyBound {
+			data.features12.descriptorBindingPartiallyBound = C.VK_TRUE
+		}
+		if info.Vulkan12Features.RuntimeDescriptorArray {
+			data.features12.runtimeDescriptorArray = C.VK_TRUE
+		}
+
+		pNext = unsafe.Pointer(data.features12)
+	}
+
+	data.cInfo.pNext = pNext
 
 	// Features (null for now)
 	data.cInfo.pEnabledFeatures = nil
@@ -134,6 +162,10 @@ func (data *deviceCreateData) free() {
 
 	for _, ext := range data.extensions {
 		C.free(unsafe.Pointer(ext))
+	}
+
+	if data.features12 != nil {
+		C.free(unsafe.Pointer(data.features12))
 	}
 
 	if data.features13 != nil {

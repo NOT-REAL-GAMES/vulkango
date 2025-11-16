@@ -66,3 +66,14 @@ func (instance Instance) EnumeratePhysicalDevices() ([]PhysicalDevice, error) {
 
 	return goDevices, nil
 }
+
+func (instance Instance) GetPhysicalDeviceProperties(device PhysicalDevice) PhysicalDeviceProperties {
+	var props C.VkPhysicalDeviceProperties
+	C.vkGetPhysicalDeviceProperties(device.handle, &props)
+
+	return PhysicalDeviceProperties{
+		Limits: PhysicalDeviceLimits{
+			MaxDescriptorSetSampledImages: uint32(props.limits.maxDescriptorSetSampledImages),
+		},
+	}
+}
