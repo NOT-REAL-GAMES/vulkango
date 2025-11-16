@@ -2212,7 +2212,7 @@ func main() {
 				case sdl.EVENT_DROP_COMPLETE:
 					fmt.Printf("File loaded!")
 
-				case sdl.EVENT_DROP_TEXT:
+				case sdl.EVENT_DROP_TEXT, sdl.EVENT_DROP_FILE:
 					drop := event.Drop
 					filePath := drop.Data
 					fmt.Printf("File dropped: %s\n", filePath)
