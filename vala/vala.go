@@ -3572,7 +3572,7 @@ func main() {
 		}
 
 		// Wait for device to finish
-		//device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
+		device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
 
 	}
 }
