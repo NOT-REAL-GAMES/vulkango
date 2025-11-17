@@ -2261,13 +2261,16 @@ func main() {
 		}
 		defer device.DestroySemaphore(renderFinishedSem)
 
-		inFlightFence, err := device.CreateFence(&vk.FenceCreateInfo{
-			Flags: vk.FENCE_CREATE_SIGNALED_BIT,
-		})
-		if err != nil {
-			panic(err)
+		inFlightFences := make([]vk.Fence, len(swapImages))
+		for i := range inFlightFences {
+			inFlightFences[i], err = device.CreateFence(&vk.FenceCreateInfo{
+				Flags: vk.FENCE_CREATE_SIGNALED_BIT,
+			})
+			if err != nil {
+				panic(err)
+			}
+			defer device.DestroyFence(inFlightFences[i])
 		}
-		defer device.DestroyFence(inFlightFence)
 
 		fmt.Println("Command buffers and sync objects created!")
 
@@ -2807,6 +2810,8 @@ func main() {
 
 		currentLayer := -4999999
 
+		imageIndexLast := uint32(0)
+
 		for running {
 
 			l2tx := world.GetTransform(layer2).X
@@ -2954,14 +2959,16 @@ func main() {
 			layer2Blend.Opacity = 1.0 // Fixed opacity (oscillation removed)
 
 			// Wait for previous frame
-			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
-			device.ResetFences([]vk.Fence{inFlightFence})
+			device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
 
 			// Acquire next image
 			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(0), imageAvailableSem, vk.Fence{})
 			if err != nil {
 				panic(fmt.Sprintf("Acquire failed: %v", err))
 			}
+
+			device.WaitForFences([]vk.Fence{inFlightFences[imageIndex]}, true, ^uint64(0))
+			device.ResetFences([]vk.Fence{inFlightFences[imageIndex]})
 
 			// Get sorted layers
 			sortedLayers := world.QueryRenderablesSorted()
@@ -2979,12 +2986,11 @@ func main() {
 				// Convert window pixel coordinates to clip space (-1 to 1)
 				clipX := (penX/float32(swapExtent.Width))*2.0 - 1.0
 				clipY := (penY/float32(swapExtent.Height))*2.0 - 1.0
-			// Apply inverse camera transform (undo zoom and pan)
-			// In shader: pos = (pos - cameraOffset) * cameraZoom
-			// Inverse: pos = pos / cameraZoom + cameraOffset
-			worldClipX := clipX/cameraZoom + cameraX
-			worldClipY := clipY/cameraZoom + cameraY
-
+				// Apply inverse camera transform (undo zoom and pan)
+				// In shader: pos = (pos - cameraOffset) * cameraZoom
+				// Inverse: pos = pos / cameraZoom + cameraOffset
+				worldClipX := clipX/cameraZoom + cameraX
+				worldClipY := clipY/cameraZoom + cameraY
 
 				// Apply inverse transform to get local clip coordinates
 				localClipX := (worldClipX - layer2Transform.X) / layer2Transform.ScaleX
@@ -3088,9 +3094,9 @@ func main() {
 				prevClipX := (prevPenX/float32(swapExtent.Width))*2.0 - 1.0
 				prevClipY := (prevPenY/float32(swapExtent.Height))*2.0 - 1.0
 
-			// Apply inverse camera transform to previous position
-			prevWorldClipX := prevClipX/cameraZoom + cameraX
-			prevWorldClipY := prevClipY/cameraZoom + cameraY
+				// Apply inverse camera transform to previous position
+				prevWorldClipX := prevClipX/cameraZoom + cameraX
+				prevWorldClipY := prevClipY/cameraZoom + cameraY
 				prevLocalClipX := (prevWorldClipX - l2tx) / layer2Transform.ScaleX
 				prevLocalClipY := (prevWorldClipY - l2ty) / layer2Transform.ScaleX
 				prevCanvasX := (prevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
@@ -3114,9 +3120,9 @@ func main() {
 				// Calculate prevPrev canvas positions for Bezier control points
 				prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
 				prevPrevClipY := (prevPrevPenY/float32(swapExtent.Height))*2.0 - 1.0
-			// Apply inverse camera transform to prevPrev position
-			prevPrevWorldClipX := prevPrevClipX/cameraZoom + cameraX
-			prevPrevWorldClipY := prevPrevClipY/cameraZoom + cameraY
+				// Apply inverse camera transform to prevPrev position
+				prevPrevWorldClipX := prevPrevClipX/cameraZoom + cameraX
+				prevPrevWorldClipY := prevPrevClipY/cameraZoom + cameraY
 
 				prevPrevLocalClipX := (prevPrevWorldClipX - l2tx) / layer2Transform.ScaleX
 				prevPrevLocalClipY := (prevPrevWorldClipY - l2ty) / layer2Transform.ScaleX
@@ -3548,7 +3554,7 @@ func main() {
 					CommandBuffers:   []vk.CommandBuffer{cmd},
 					SignalSemaphores: []vk.Semaphore{renderFinishedSem},
 				},
-			}, inFlightFence)
+			}, inFlightFences[imageIndex])
 			if err != nil {
 				panic(fmt.Sprintf("Queue submit failed: %v", err))
 			}
@@ -3560,12 +3566,13 @@ func main() {
 				ImageIndices:   []uint32{imageIndex},
 			})
 
-			sdl.Delay(5)
+			imageIndexLast = imageIndex
 
+			sdl.Delay(1)
 		}
 
 		// Wait for device to finish
-		device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
+		//device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
 
 	}
 }
