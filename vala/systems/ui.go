@@ -23,8 +23,24 @@ type UIRenderContext struct {
 // This should be called once per frame BEFORE rendering.
 // mouseX, mouseY: current mouse position in screen space (pixels)
 // mouseButtonDown: true if left mouse button is currently pressed
-func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown bool) {
+// cameraX, cameraY, cameraZoom: camera transform parameters
+// swapWidth, swapHeight: window dimensions for coordinate conversion
+func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown bool, cameraX, cameraY, cameraZoom float32, swapWidth, swapHeight uint32) {
 	buttons := world.QueryUIButtons()
+
+	// Apply inverse camera transform to mouse position
+	// Convert mouse pixels to clip space (-1 to 1)
+	mouseClipX := (mouseX/float32(swapWidth))*2.0 - 1.0
+	mouseClipY := (mouseY/float32(swapHeight))*2.0 - 1.0
+
+	// Apply inverse camera transform: pos = pos / zoom + offset
+	// (This undoes the camera transform applied during composite rendering)
+	worldClipX := mouseClipX/cameraZoom + cameraX
+	worldClipY := mouseClipY/cameraZoom + cameraY
+
+	// Convert back to pixel coordinates for comparison with button bounds
+	worldPixelX := ((worldClipX + 1.0) / 2.0) * float32(swapWidth)
+	worldPixelY := ((worldClipY + 1.0) / 2.0) * float32(swapHeight)
 
 	for _, entity := range buttons {
 		button := world.GetUIButton(entity)
@@ -32,9 +48,9 @@ func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown b
 			continue
 		}
 
-		// Check if mouse is hovering over button
-		isHovering := mouseX >= button.X && mouseX <= button.X+button.Width &&
-			mouseY >= button.Y && mouseY <= button.Y+button.Height
+		// Check if transformed mouse is hovering over button
+		isHovering := worldPixelX >= button.X && worldPixelX <= button.X+button.Width &&
+			worldPixelY >= button.Y && worldPixelY <= button.Y+button.Height
 
 		// Update button state based on hover and mouse button
 		if isHovering {

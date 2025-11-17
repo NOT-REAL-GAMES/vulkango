@@ -2944,7 +2944,7 @@ func main() {
 			world.AddText(helloText, textComp)
 
 			// Update UI button states
-			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown)
+			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
 			// Animate layer2 in a circle
 
 			// Oscillate layer2 opacity between 0.0 and 1.0
