@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 	"unsafe"
 
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
@@ -96,13 +95,17 @@ layout(push_constant) uniform LayerPushConstants {
     uint textureIndex;   // Index into bindless texture array
     vec2 offset;         // Layer position offset
     float scale;         // Layer scale
+    vec2 cameraOffset;   // Camera pan offset
+    float cameraZoom;    // Camera zoom level
 } layer;
 
 layout(location = 0) out vec2 fragTexCoord;
 
 void main() {
-    // Apply transform to quad vertices
+    // Apply layer transform first
     vec2 pos = positions[gl_VertexIndex] * layer.scale + layer.offset;
+    // Then apply camera transform (pan and zoom)
+    pos = (pos - layer.cameraOffset) * layer.cameraZoom;
     gl_Position = vec4(pos, 0.0, 1.0);
     fragTexCoord = texCoords[gl_VertexIndex];
 }
@@ -114,20 +117,50 @@ const compositeFragmentShader = `
 
 layout(location = 0) in vec2 fragTexCoord;
 
-// BINDLESS: Array of ALL textures!
-layout(binding = 0) uniform sampler2D textures[];
+// MULTI-BINDING BINDLESS: 8 texture arrays for massive layer counts!
+// Each binding holds 16K textures = 131K total textures
+layout(set = 0, binding = 0) uniform sampler2D textures0[16384];  // Textures 0-16383
+layout(set = 0, binding = 1) uniform sampler2D textures1[16384];  // Textures 16384-32767
+layout(set = 0, binding = 2) uniform sampler2D textures2[16384];  // Textures 32768-49151
+layout(set = 0, binding = 3) uniform sampler2D textures3[16384];  // Textures 49152-65535
+layout(set = 0, binding = 4) uniform sampler2D textures4[16384];  // Textures 65536-81919
+layout(set = 0, binding = 5) uniform sampler2D textures5[16384];  // Textures 81920-98303
+layout(set = 0, binding = 6) uniform sampler2D textures6[16384];  // Textures 98304-114687
+layout(set = 0, binding = 7) uniform sampler2D textures7[16384];  // Textures 114688-131071
 
 // Push constant for layer opacity and texture index
 layout(push_constant) uniform LayerPushConstants {
     float opacity;       // Layer opacity (0.0 to 1.0)
-    uint textureIndex;   // Index into bindless texture array
+    uint textureIndex;   // Global index into bindless texture arrays
 } layer;
 
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    // Sample from bindless texture array using nonuniformEXT
-    vec4 texColor = texture(textures[nonuniformEXT(layer.textureIndex)], fragTexCoord);
+    // Map global index to (binding, arrayIndex)
+    uint binding = layer.textureIndex / 16384u;
+    uint arrayIndex = layer.textureIndex % 16384u;
+
+    // Sample from the appropriate texture array
+    vec4 texColor;
+    if (binding == 0u) {
+        texColor = texture(textures0[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 1u) {
+        texColor = texture(textures1[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 2u) {
+        texColor = texture(textures2[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 3u) {
+        texColor = texture(textures3[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 4u) {
+        texColor = texture(textures4[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 5u) {
+        texColor = texture(textures5[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else if (binding == 6u) {
+        texColor = texture(textures6[nonuniformEXT(arrayIndex)], fragTexCoord);
+    } else { // binding == 7u
+        texColor = texture(textures7[nonuniformEXT(arrayIndex)], fragTexCoord);
+    }
+
     // Apply layer opacity to the alpha channel
     outColor = vec4(texColor.rgb, texColor.a * layer.opacity);
 }
@@ -193,6 +226,53 @@ void main() {
 
     // Output color with alpha
     outColor = vec4(brush.brushColor.rgb, brush.brushColor.a);
+}
+`
+
+const uiRectVertexShader = `
+#version 450
+
+// Input: quad vertices (0,0 to 1,1)
+layout(location = 0) in vec2 inPosition;
+
+// Push constants for UI rectangles
+layout(push_constant) uniform UIRectPushConstants {
+    float posX;
+    float posY;
+    float width;
+    float height;
+    float colorR;
+    float colorG;
+    float colorB;
+    float colorA;
+} rect;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    // Convert button rect to NDC
+    // Button coords are in pixels (0,0 = top-left)
+    vec2 screenSize = vec2(960.0, 960.0); // TODO: Pass as uniform
+
+    // Calculate position in pixels
+    vec2 pixelPos = vec2(rect.posX, rect.posY) + inPosition * vec2(rect.width, rect.height);
+
+    // Convert to NDC (-1 to 1, with Y flipped for Vulkan)
+    vec2 ndc = (pixelPos / screenSize) * 2.0 - 1.0;
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    fragColor = vec4(rect.colorR, rect.colorG, rect.colorB, rect.colorA);
+}
+`
+
+const uiRectFragmentShader = `
+#version 450
+
+layout(location = 0) in vec4 fragColor;
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    outColor = fragColor;
 }
 `
 
@@ -565,11 +645,15 @@ func CreateImageLayer(
 
 	// Upload SOURCE TEXTURE to global bindless descriptor set
 	// (For simple image layers, we composite the source directly, not a rendered framebuffer)
+	// Calculate which binding and array index to use for multi-binding architecture
+	const texturesPerBinding = 16384
+	binding := textureIndex / texturesPerBinding
+	arrayElement := textureIndex % texturesPerBinding
 	device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
 		{
 			DstSet:          globalBindlessDescriptorSet,
-			DstBinding:      0,
-			DstArrayElement: textureIndex,
+			DstBinding:      binding,
+			DstArrayElement: arrayElement,
 			DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 			ImageInfo: []vk.DescriptorImageInfo{{
 				Sampler:     textureSampler,
@@ -832,18 +916,69 @@ func main() {
 		fmt.Printf("\n🎨 BINDLESS TEXTURES ENABLED!\n")
 		fmt.Printf("GPU reports %d sampled images, using %d (capped for compatibility)\n", gpuLimit, maxTextures)
 
-		// Create BINDLESS descriptor set layout (one binding = ARRAY of all textures!)
+		const texturesPerBinding = 16384
+		// Create MULTI-BINDING BINDLESS descriptor set layout
+		// 8 bindings × 16K textures = 131K total texture capacity
 		descriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
 					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					DescriptorCount: maxTextures, // THE ENTIRE ARRAY!
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         1,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         2,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         3,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         4,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         5,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         6,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         7,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
 					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
 				},
 			},
 			BindingFlags: []vk.DescriptorBindingFlagBits{
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Allow unbound array elements
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 0
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 1
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 2
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 3
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 4
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 5
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 6
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 7
 			},
 		})
 		if err != nil {
@@ -957,18 +1092,68 @@ func main() {
 		}
 		defer device.DestroyShaderModule(compositeFragShader)
 
-		// Create composite descriptor set layout (BINDLESS!)
+		// Create composite descriptor set layout (MULTI-BINDING BINDLESS!)
+		// 8 bindings × 16K textures = 131K total texture capacity
 		compositeDescriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
 					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					DescriptorCount: maxTextures, // Entire bindless array!
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         1,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         2,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         3,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         4,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         5,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         6,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+				{
+					Binding:         7,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: texturesPerBinding,
 					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
 				},
 			},
 			BindingFlags: []vk.DescriptorBindingFlagBits{
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Allow unbound array elements
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 0
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 1
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 2
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 3
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 4
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 5
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 6
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 7
 			},
 		})
 		if err != nil {
@@ -983,7 +1168,7 @@ func main() {
 				{
 					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
 					Offset:     0,
-					Size:       20, // opacity(4) + textureIndex(4) + offset(8) + scale(4) = 20 bytes
+					Size:       36, // opacity(4) + textureIndex(4) + offset(8) + scale(4) + padding(4) + cameraOffset(8) + cameraZoom(4) = 36 bytes
 				},
 			},
 		})
@@ -1158,12 +1343,125 @@ func main() {
 
 		fmt.Println("Brush pipeline created!")
 
-		// Create BINDLESS descriptor pool (1 set with ALL texture slots!)
-		fmt.Printf("Creating bindless descriptor pool: 1 set × %d textures\n", maxTextures)
+		// ===== UI Rectangle Pipeline =====
+		// Compile UI rectangle shaders
+		uiRectVertResult, err := compiler.CompileIntoSPV(uiRectVertexShader, "ui_rect.vert", shaderc.VertexShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("UI rect vertex shader compilation failed: %v", err))
+		}
+		uiRectVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: uiRectVertResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(uiRectVertShader)
+
+		uiRectFragResult, err := compiler.CompileIntoSPV(uiRectFragmentShader, "ui_rect.frag", shaderc.FragmentShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("UI rect fragment shader compilation failed: %v", err))
+		}
+		uiRectFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: uiRectFragResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(uiRectFragShader)
+
+		// UI rect push constants: posX, posY, width, height, colorR, colorG, colorB, colorA
+		// Total: 8 floats = 32 bytes
+		uiRectPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+					Offset:     0,
+					Size:       32, // 8 floats
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipelineLayout(uiRectPipelineLayout)
+
+		// Create UI rectangle graphics pipeline
+		uiRectPipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
+			Stages: []vk.PipelineShaderStageCreateInfo{
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: uiRectVertShader, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: uiRectFragShader, Name: "main"},
+			},
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{
+						Binding:   0,
+						Stride:    8, // 2 floats (vec2)
+						InputRate: vk.VERTEX_INPUT_RATE_VERTEX,
+					},
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{
+						Location: 0,
+						Binding:  0,
+						Format:   vk.FORMAT_R32G32_SFLOAT, // vec2
+						Offset:   0,
+					},
+				},
+			},
+			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			},
+			ViewportState: &vk.PipelineViewportStateCreateInfo{
+				Viewports: []vk.Viewport{},
+				Scissors:  []vk.Rect2D{},
+			},
+			RasterizationState: &vk.PipelineRasterizationStateCreateInfo{
+				PolygonMode: vk.POLYGON_MODE_FILL,
+				CullMode:    vk.CULL_MODE_NONE,
+				FrontFace:   vk.FRONT_FACE_COUNTER_CLOCKWISE,
+				LineWidth:   1.0,
+			},
+			MultisampleState: &vk.PipelineMultisampleStateCreateInfo{
+				RasterizationSamples: vk.SAMPLE_COUNT_1_BIT,
+			},
+			ColorBlendState: &vk.PipelineColorBlendStateCreateInfo{
+				Attachments: []vk.PipelineColorBlendAttachmentState{
+					{
+						BlendEnable:         true,
+						SrcColorBlendFactor: vk.BLEND_FACTOR_SRC_ALPHA,
+						DstColorBlendFactor: vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+						ColorBlendOp:        vk.BLEND_OP_ADD,
+						SrcAlphaBlendFactor: vk.BLEND_FACTOR_ONE,
+						DstAlphaBlendFactor: vk.BLEND_FACTOR_ZERO,
+						AlphaBlendOp:        vk.BLEND_OP_ADD,
+						ColorWriteMask:      vk.COLOR_COMPONENT_ALL,
+					},
+				},
+			},
+			DynamicState: &vk.PipelineDynamicStateCreateInfo{
+				DynamicStates: []vk.DynamicState{
+					vk.DYNAMIC_STATE_VIEWPORT,
+					vk.DYNAMIC_STATE_SCISSOR,
+				},
+			},
+			Layout: uiRectPipelineLayout,
+			RenderingInfo: &vk.PipelineRenderingCreateInfo{
+				ColorAttachmentFormats: []vk.Format{vk.FORMAT_R8G8B8A8_UNORM}, // UI layer format
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipeline(uiRectPipeline)
+
+		fmt.Println("UI rectangle pipeline created!")
+
+		// Create MULTI-BINDING BINDLESS descriptor pool
+		// 1 set with 8 bindings × 16K textures = 131K total capacity
+		const numBindings = 8
+		totalTextureCapacity := texturesPerBinding * numBindings
+		fmt.Printf("Creating multi-binding bindless descriptor pool:\n")
+		fmt.Printf("  - %d bindings × %d textures = %d total capacity\n", numBindings, texturesPerBinding, totalTextureCapacity)
 		bindlessDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
 			MaxSets: 1, // Only ONE descriptor set needed for bindless!
 			PoolSizes: []vk.DescriptorPoolSize{
-				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: maxTextures},
+				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: uint32(totalTextureCapacity)},
 			},
 		})
 		if err != nil {
@@ -1855,10 +2153,11 @@ func main() {
 		textVertexBufferSize := uint64(maxTextChars * 4 * 16) // 4 verts * 16 bytes per vertex
 		textIndexBufferSize := uint64(maxTextChars * 6 * 2)   // 6 indices * 2 bytes per index
 
+		// Create DEVICE_LOCAL main buffers (GPU-only, fast rendering)
 		textVertexBuffer, textVertexMemory, err := device.CreateBufferWithMemory(
 			textVertexBufferSize,
-			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
-			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT|vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			physicalDevice,
 		)
 		if err != nil {
@@ -1869,8 +2168,8 @@ func main() {
 
 		textIndexBuffer, textIndexMemory, err := device.CreateBufferWithMemory(
 			textIndexBufferSize,
-			vk.BUFFER_USAGE_INDEX_BUFFER_BIT,
-			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			vk.BUFFER_USAGE_INDEX_BUFFER_BIT|vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			physicalDevice,
 		)
 		if err != nil {
@@ -1878,6 +2177,49 @@ func main() {
 		}
 		defer device.DestroyBuffer(textIndexBuffer)
 		defer device.FreeMemory(textIndexMemory)
+
+		// Create HOST_VISIBLE staging buffers (CPU-writable, for uploading data)
+		textStagingVertexBuffer, textStagingVertexMemory, err := device.CreateBufferWithMemory(
+			textVertexBufferSize,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textStagingVertexBuffer)
+		defer device.FreeMemory(textStagingVertexMemory)
+
+		textStagingIndexBuffer, textStagingIndexMemory, err := device.CreateBufferWithMemory(
+			textIndexBufferSize,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textStagingIndexBuffer)
+		defer device.FreeMemory(textStagingIndexMemory)
+
+		// Create TextRenderer for UI button labels
+		textRenderer := &systems.TextRenderer{
+			Pipeline:            textPipeline,
+			PipelineLayout:      textPipelineLayout,
+			DescriptorSet:       textDescriptorSet,
+			Atlas:               sdfAtlas,
+			VertexBuffer:        textVertexBuffer,
+			VertexMemory:        textVertexMemory,
+			IndexBuffer:         textIndexBuffer,
+			IndexMemory:         textIndexMemory,
+			StagingVertexBuffer: textStagingVertexBuffer,
+			StagingVertexMemory: textStagingVertexMemory,
+			StagingIndexBuffer:  textStagingIndexBuffer,
+			StagingIndexMemory:  textStagingIndexMemory,
+			MaxChars:            maxTextChars,
+		}
+		fmt.Println("TextRenderer initialized for UI labels!")
 
 		// Create descriptor set layout
 
@@ -1958,11 +2300,14 @@ func main() {
 		fmt.Printf("Assigned texture index %d to layer1\n", layer1TextureIndex)
 
 		// Upload texture to global bindless descriptor set
+		// Calculate which binding and array index to use for multi-binding architecture
+		binding1 := layer1TextureIndex / texturesPerBinding
+		arrayElement1 := layer1TextureIndex % texturesPerBinding
 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
-				DstBinding:      0,
-				DstArrayElement: layer1TextureIndex,
+				DstBinding:      binding1,
+				DstArrayElement: arrayElement1,
 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 				ImageInfo: []vk.DescriptorImageInfo{{
 					Sampler:     textureSampler,
@@ -2057,9 +2402,9 @@ func main() {
 		// BINDLESS: 			},
 		// BINDLESS: 		})
 
-	// BINDLESS: 		// Update layer1's VulkanPipeline with composite descriptor set
-	// BINDLESS: 		layer1Pipeline := world.GetVulkanPipeline(layer1)
-	// BINDLESS: 		layer1Pipeline.CompositeDescriptorSet = layer1CompositeDescSet
+		// BINDLESS: 		// Update layer1's VulkanPipeline with composite descriptor set
+		// BINDLESS: 		layer1Pipeline := world.GetVulkanPipeline(layer1)
+		// BINDLESS: 		layer1Pipeline.CompositeDescriptorSet = layer1CompositeDescSet
 
 		// Create a second layer entity (demonstrating multi-layer support)
 		layer2 := world.CreateEntity()
@@ -2085,11 +2430,14 @@ func main() {
 		fmt.Printf("Assigned texture index %d to layer2\n", layer2TextureIndex)
 
 		// Upload texture to global bindless descriptor set
+		// Calculate which binding and array index to use for multi-binding architecture
+		binding2 := layer2TextureIndex / texturesPerBinding
+		arrayElement2 := layer2TextureIndex % texturesPerBinding
 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
-				DstBinding:      0,
-				DstArrayElement: layer2TextureIndex,
+				DstBinding:      binding2,
+				DstArrayElement: arrayElement2,
 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 				ImageInfo: []vk.DescriptorImageInfo{{
 					Sampler:     canvasSampler,
@@ -2183,9 +2531,9 @@ func main() {
 		// BINDLESS: 			},
 		// BINDLESS: 		})
 
-	// BINDLESS: 		// Update layer2's VulkanPipeline with composite descriptor set
-	// BINDLESS: 		layer2Pipeline := world.GetVulkanPipeline(layer2)
-	// BINDLESS: 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
+		// BINDLESS: 		// Update layer2's VulkanPipeline with composite descriptor set
+		// BINDLESS: 		layer2Pipeline := world.GetVulkanPipeline(layer2)
+		// BINDLESS: 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
 
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
@@ -2196,6 +2544,138 @@ func main() {
 		textComponent.Color = [4]float32{1.0, 1.0, 1.0, 1.0} // White
 		world.AddText(helloText, textComponent)
 		fmt.Println("Created Hello World text entity")
+
+		// Create test UI button
+		testButton := world.CreateEntity()
+		buttonComponent := ecs.NewUIButton(300.0, 200.0, 150.0, 50.0, func() {
+			fmt.Println("Button clicked!")
+		})
+		buttonComponent.Label = "Click Me"
+		buttonComponent.LabelColor = [4]float32{0.0, 0.0, 0.0, 1.0}
+		buttonComponent.LabelHovered = [4]float32{0.0, 0.0, 0.0, 1.0}
+		buttonComponent.LabelPressed = [4]float32{1.0, 0.0, 0.0, 1.0}
+		world.AddUIButton(testButton, buttonComponent)
+		fmt.Println("Created test button entity")
+
+		// === UI Layer Z-Index Constants ===
+		// Reserve top 16 Z-indices for UI layers (0x7ffff0 to 0x7fffff)
+		const (
+			UILayerButtonBase = 0x7ffffe // Button base rectangles (below text)
+			UILayerButtonText = 0x7fffff // Button text labels (on top)
+		)
+
+		// Helper function to create a UI layer
+		createUILayer := func(name string, zindex int) (ecs.Entity, vk.Image, vk.ImageView, vk.DeviceMemory) {
+			layer := world.CreateEntity()
+			fmt.Printf("Created UI layer '%s' (entity %d, zindex 0x%x)\n", name, layer, zindex)
+
+			// Add Transform component
+			transform := ecs.NewTransform()
+			transform.ZIndex = zindex
+			world.AddTransform(layer, transform)
+
+			// Add VulkanPipeline component
+			world.AddVulkanPipeline(layer, &ecs.VulkanPipeline{
+				Pipeline:            pipeline,
+				PipelineLayout:      pipelineLayout,
+				DescriptorPool:      descriptorPool,
+				DescriptorSet:       vk.DescriptorSet{},
+				DescriptorSetLayout: descriptorSetLayout,
+			})
+
+			// Create framebuffer for this UI layer
+			layerImage, layerImageMemory, err := device.CreateImageWithMemory(
+				swapExtent.Width,
+				swapExtent.Height,
+				vk.FORMAT_R8G8B8A8_UNORM,
+				vk.IMAGE_TILING_OPTIMAL,
+				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				physicalDevice,
+			)
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create UI layer '%s' image: %v", name, err))
+			}
+
+			layerImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+				Image:    layerImage,
+				ViewType: vk.IMAGE_VIEW_TYPE_2D,
+				Format:   vk.FORMAT_R8G8B8A8_UNORM,
+				SubresourceRange: vk.ImageSubresourceRange{
+					AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+					BaseMipLevel:   0,
+					LevelCount:     1,
+					BaseArrayLayer: 0,
+					LayerCount:     1,
+				},
+			})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create UI layer '%s' image view: %v", name, err))
+			}
+
+			// Add RenderTarget component
+			world.AddRenderTarget(layer, &ecs.RenderTarget{
+				Image:       layerImage,
+				ImageView:   layerImageView,
+				ImageMemory: layerImageMemory,
+				Format:      vk.FORMAT_R8G8B8A8_UNORM,
+				Width:       swapExtent.Width,
+				Height:      swapExtent.Height,
+			})
+
+			// Assign bindless texture index
+			textureIndex := assignNextTextureIndex()
+			binding := textureIndex / texturesPerBinding
+			arrayElement := textureIndex % texturesPerBinding
+
+			// Upload to global bindless descriptor set
+			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				{
+					DstSet:          globalBindlessDescriptorSet,
+					DstBinding:      binding,
+					DstArrayElement: arrayElement,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					ImageInfo: []vk.DescriptorImageInfo{{
+						Sampler:     layerSampler,
+						ImageView:   layerImageView,
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					}},
+				},
+			})
+
+			// Add TextureData component
+			world.AddTextureData(layer, &ecs.TextureData{
+				Image:        layerImage,
+				ImageView:    layerImageView,
+				ImageMemory:  layerImageMemory,
+				Sampler:      layerSampler,
+				Width:        swapExtent.Width,
+				Height:       swapExtent.Height,
+				TextureIndex: textureIndex,
+			})
+
+			// Add BlendMode component (fully opaque and visible)
+			world.AddBlendMode(layer, ecs.NewBlendMode())
+
+			fmt.Printf("UI layer '%s' configured (texture index %d)\n", name, textureIndex)
+			return layer, layerImage, layerImageView, layerImageMemory
+		}
+
+		// === Create UI Layers (Multi-Layer Architecture) ===
+		// Create button base layer (renders button rectangles)
+		uiButtonBaseLayer, uiButtonBaseImage, uiButtonBaseView, uiButtonBaseMem := createUILayer("ButtonBase", UILayerButtonBase)
+		defer device.DestroyImage(uiButtonBaseImage)
+		defer device.DestroyImageView(uiButtonBaseView)
+		defer device.FreeMemory(uiButtonBaseMem)
+
+		// Create button text layer (renders button labels)
+		uiButtonTextLayer, uiButtonTextImage, uiButtonTextView, uiButtonTextMem := createUILayer("ButtonText", UILayerButtonText)
+		defer device.DestroyImage(uiButtonTextImage)
+		defer device.DestroyImageView(uiButtonTextView)
+		defer device.FreeMemory(uiButtonTextMem)
+
+		// Note: Old uiLayer variable removed - now using uiButtonBaseLayer and uiButtonTextLayer
+		fmt.Printf("Created %d UI layers for multi-layer rendering\n", 2)
 
 		// === Initial Image Layout Transitions ===
 		// Transition layer framebuffers from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
@@ -2242,6 +2722,38 @@ func main() {
 						LayerCount:     1,
 					},
 				},
+				{
+					SrcAccessMask:       vk.ACCESS_NONE,
+					DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+					NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               uiButtonBaseImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
+				{
+					SrcAccessMask:       vk.ACCESS_NONE,
+					DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+					NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               uiButtonTextImage,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				},
 			},
 		)
 
@@ -2262,7 +2774,7 @@ func main() {
 
 		// Render loop
 		fmt.Println("\n=== Rendering via ECS - close window to exit ===")
-		startTime := time.Now()
+		// startTime := time.Now() // Not currently used (circular motion removed)
 		running := true
 
 		// Pen state tracking
@@ -2280,18 +2792,25 @@ func main() {
 		prevPenPressure := float32(0.0)
 		penDown := false
 
+		// Mouse state tracking for UI
+		mouseX := float32(0.0)
+		mouseY := float32(0.0)
+		mouseButtonDown := false
+
+		// Camera state for canvas navigation
+		cameraX := float32(0.0)
+		cameraY := float32(0.0)
+		cameraZoom := float32(1.0)
+		middleButtonDown := false
+		lastMouseX := float32(0.0)
+		lastMouseY := float32(0.0)
+
 		currentLayer := -4999999
 
 		for running {
 
 			l2tx := world.GetTransform(layer2).X
 			l2ty := world.GetTransform(layer2).Y
-
-			elapsed := float32(time.Since(startTime).Seconds())
-			layer2Transform := world.GetTransform(layer2)
-			radius := float32(0.5)
-			layer2Transform.X = radius * float32(math.Sin(float64(elapsed)))
-			layer2Transform.Y = radius * float32(math.Cos(float64(elapsed)))
 
 			// Handle events
 			for event, ok := sdl.PollEvent(); ok; event, ok = sdl.PollEvent() {
@@ -2310,6 +2829,72 @@ func main() {
 					penX = motion.X
 					penY = motion.Y
 					penDown = motion.IsDown()
+
+				case sdl.EVENT_MOUSE_MOTION:
+					mouseMotion := event.MouseMotion
+					mouseX = mouseMotion.X
+					mouseY = mouseMotion.Y
+
+					// Handle canvas panning with middle mouse button
+					if middleButtonDown {
+						deltaX := mouseX - lastMouseX
+						deltaY := mouseY - lastMouseY
+						// Convert screen delta to NDC delta (account for zoom)
+						ndcDeltaX := (deltaX / float32(swapExtent.Width)) * 2.0 / cameraZoom
+						ndcDeltaY := (deltaY / float32(swapExtent.Height)) * 2.0 / cameraZoom
+						cameraX -= ndcDeltaX
+						cameraY -= ndcDeltaY
+						lastMouseX = mouseX
+						lastMouseY = mouseY
+					}
+
+				case sdl.EVENT_MOUSE_BUTTON_DOWN:
+					if event.MouseButton.Button == sdl.BUTTON_LEFT {
+						mouseButtonDown = true
+					} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
+						middleButtonDown = true
+						lastMouseX = mouseX
+						lastMouseY = mouseY
+					}
+
+				case sdl.EVENT_MOUSE_BUTTON_UP:
+					if event.MouseButton.Button == sdl.BUTTON_LEFT {
+						mouseButtonDown = false
+					} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
+						middleButtonDown = false
+					}
+
+				case sdl.EVENT_MOUSE_WHEEL:
+					wheel := event.MouseWheel
+					// Calculate world position of mouse before zoom
+					screenCenterX := float32(swapExtent.Width) / 2.0
+					screenCenterY := float32(swapExtent.Height) / 2.0
+					// Mouse position in NDC relative to screen center
+					mouseNDCX := (mouseX - screenCenterX) / screenCenterX
+					mouseNDCY := (mouseY - screenCenterY) / screenCenterY
+					// World position under mouse cursor
+					worldX := mouseNDCX/cameraZoom + cameraX
+					worldY := mouseNDCY/cameraZoom + cameraY
+
+					// Apply zoom
+					zoomFactor := float32(1.0)
+					if wheel.Y > 0 {
+						zoomFactor = 1.1 // Zoom in
+					} else if wheel.Y < 0 {
+						zoomFactor = 0.9 // Zoom out
+					}
+					cameraZoom *= zoomFactor
+
+					// Clamp zoom to reasonable limits
+					if cameraZoom < 0.1 {
+						cameraZoom = 0.1
+					} else if cameraZoom > 10.0 {
+						cameraZoom = 10.0
+					}
+
+					// Adjust camera position to keep world position under mouse
+					cameraX = worldX - mouseNDCX/cameraZoom
+					cameraY = worldY - mouseNDCY/cameraZoom
 
 				case sdl.EVENT_DROP_COMPLETE:
 					fmt.Printf("File loaded!")
@@ -2358,11 +2943,15 @@ func main() {
 				penX, penY, penPressure, penDown)
 			world.AddText(helloText, textComp)
 
+			// Update UI button states
+			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown)
 			// Animate layer2 in a circle
 
 			// Oscillate layer2 opacity between 0.0 and 1.0
 			layer2Blend := world.GetBlendMode(layer2)
-			layer2Blend.Opacity = (float32(math.Sin(float64(elapsed*8.0))) + 1.0) / 2.0
+			// elapsed := float32(time.Since(startTime).Seconds())
+			// layer2Blend.Opacity = (float32(math.Sin(float64(elapsed*8.0))) + 1.0) / 2.0
+			layer2Blend.Opacity = 1.0 // Fixed opacity (oscillation removed)
 
 			// Wait for previous frame
 			device.WaitForFences([]vk.Fence{inFlightFence}, true, ^uint64(0))
@@ -2390,10 +2979,16 @@ func main() {
 				// Convert window pixel coordinates to clip space (-1 to 1)
 				clipX := (penX/float32(swapExtent.Width))*2.0 - 1.0
 				clipY := (penY/float32(swapExtent.Height))*2.0 - 1.0
+			// Apply inverse camera transform (undo zoom and pan)
+			// In shader: pos = (pos - cameraOffset) * cameraZoom
+			// Inverse: pos = pos / cameraZoom + cameraOffset
+			worldClipX := clipX/cameraZoom + cameraX
+			worldClipY := clipY/cameraZoom + cameraY
+
 
 				// Apply inverse transform to get local clip coordinates
-				localClipX := (clipX - layer2Transform.X) / layer2Transform.ScaleX
-				localClipY := (clipY - layer2Transform.Y) / layer2Transform.ScaleX
+				localClipX := (worldClipX - layer2Transform.X) / layer2Transform.ScaleX
+				localClipY := (worldClipY - layer2Transform.Y) / layer2Transform.ScaleX
 
 				// Convert from clip space (-1 to 1) to canvas pixel coordinates
 				canvasX := (localClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
@@ -2492,8 +3087,12 @@ func main() {
 
 				prevClipX := (prevPenX/float32(swapExtent.Width))*2.0 - 1.0
 				prevClipY := (prevPenY/float32(swapExtent.Height))*2.0 - 1.0
-				prevLocalClipX := (prevClipX - l2tx) / layer2Transform.ScaleX
-				prevLocalClipY := (prevClipY - l2ty) / layer2Transform.ScaleX
+
+			// Apply inverse camera transform to previous position
+			prevWorldClipX := prevClipX/cameraZoom + cameraX
+			prevWorldClipY := prevClipY/cameraZoom + cameraY
+				prevLocalClipX := (prevWorldClipX - l2tx) / layer2Transform.ScaleX
+				prevLocalClipY := (prevWorldClipY - l2ty) / layer2Transform.ScaleX
 				prevCanvasX := (prevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
 				prevCanvasY := (prevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
@@ -2515,8 +3114,12 @@ func main() {
 				// Calculate prevPrev canvas positions for Bezier control points
 				prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
 				prevPrevClipY := (prevPrevPenY/float32(swapExtent.Height))*2.0 - 1.0
-				prevPrevLocalClipX := (prevPrevClipX - l2tx) / layer2Transform.ScaleX
-				prevPrevLocalClipY := (prevPrevClipY - l2ty) / layer2Transform.ScaleX
+			// Apply inverse camera transform to prevPrev position
+			prevPrevWorldClipX := prevPrevClipX/cameraZoom + cameraX
+			prevPrevWorldClipY := prevPrevClipY/cameraZoom + cameraY
+
+				prevPrevLocalClipX := (prevPrevWorldClipX - l2tx) / layer2Transform.ScaleX
+				prevPrevLocalClipY := (prevPrevWorldClipY - l2ty) / layer2Transform.ScaleX
 				prevPrevCanvasX := (prevPrevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
 				prevPrevCanvasY := (prevPrevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
@@ -2663,17 +3266,37 @@ func main() {
 				})
 
 				// Render layer content
-				renderCtx := &systems.RenderContext{
-					CommandBuffer:       cmd,
-					SwapExtent:          swapExtent,
-					VertexBuffer:        vertexBuffer,
-					IndexBuffer:         indexBuffer,
-					IndexCount:          uint32(len(indices)),
-					Device:              device,
-					DescriptorPool:      descriptorPool,
-					DescriptorSetLayout: descriptorSetLayout,
+				// Check if this is a UI layer - render UI elements instead of textured content
+				uiCtx := &systems.UIRenderContext{
+					Device:               device,
+					CommandBuffer:        cmd,
+					UIRectPipeline:       uiRectPipeline,
+					UIRectPipelineLayout: uiRectPipelineLayout,
+					BrushVertexBuffer:    brushVertexBuffer,
+					SwapExtent:           swapExtent,
+					TextRenderer:         textRenderer,
 				}
-				systems.RenderLayerContent(world, renderCtx, entity)
+
+				if entity == uiButtonBaseLayer {
+					// Render button base rectangles only (no text)
+					systems.RenderUIButtonBases(world, uiCtx)
+				} else if entity == uiButtonTextLayer {
+					// Render button text labels only (no rectangles)
+					systems.RenderUIButtonLabels(world, uiCtx)
+				} else {
+					// Normal layer - render textured quad
+					renderCtx := &systems.RenderContext{
+						CommandBuffer:       cmd,
+						SwapExtent:          swapExtent,
+						VertexBuffer:        vertexBuffer,
+						IndexBuffer:         indexBuffer,
+						IndexCount:          uint32(len(indices)),
+						Device:              device,
+						DescriptorPool:      descriptorPool,
+						DescriptorSetLayout: descriptorSetLayout,
+					}
+					systems.RenderLayerContent(world, renderCtx, entity)
+				}
 
 				cmd.EndRendering()
 
@@ -2783,104 +3406,110 @@ func main() {
 						transform.X,
 						transform.Y,
 						transform.ScaleX,
+						cameraX,
+						cameraY,
+						cameraZoom,
 					)
 				}
 			}
 
 			// === Render Text Overlay ===
+			// NOTE: Old direct text rendering disabled - now using button labels with staging buffers
 			// Query all text entities
-			textEntities := world.QueryAll(func(e ecs.Entity) bool {
-				return world.HasText(e) && world.GetText(e).Visible
-			})
-
-			for _, entity := range textEntities {
-				textComp := world.GetText(entity)
-
-				// Generate text quads
-				vertices, indices := systems.GenerateTextQuads(textComp, sdfAtlas)
-				if len(vertices) == 0 {
-					continue
-				}
-
-				// Upload vertices
-				vertexData := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*16)
-				err = device.UploadToBuffer(textVertexMemory, vertexData)
-				if err != nil {
-					panic(fmt.Sprintf("Text vertex upload failed: %v", err))
-				}
-
-				// Upload indices
-				indexData := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*2)
-				err = device.UploadToBuffer(textIndexMemory, indexData)
-				if err != nil {
-					panic(fmt.Sprintf("Text index upload failed: %v", err))
-				}
-
-				// Bind text pipeline
-				cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
-
-				// Bind descriptor set (SDF atlas)
-				cmd.BindDescriptorSets(
-					vk.PIPELINE_BIND_POINT_GRAPHICS,
-					textPipelineLayout,
-					0,
-					[]vk.DescriptorSet{textDescriptorSet},
-					nil,
-				)
-
-				// Set viewport and scissor
-				cmd.SetViewport(0, []vk.Viewport{
-					{
-						X:        0,
-						Y:        0,
-						Width:    float32(swapExtent.Width),
-						Height:   float32(swapExtent.Height),
-						MinDepth: 0.0,
-						MaxDepth: 1.0,
-					},
-				})
-				cmd.SetScissor(0, []vk.Rect2D{
-					{
-						Offset: vk.Offset2D{X: 0, Y: 0},
-						Extent: swapExtent,
-					},
+			/*
+				textEntities := world.QueryAll(func(e ecs.Entity) bool {
+					return world.HasText(e) && world.GetText(e).Visible
 				})
 
-				// Push constants (screen size and text color)
-				// NOTE: Must match std140 layout - vec4 aligned to 16 bytes
-				type TextPushConstants struct {
-					ScreenWidth  float32
-					ScreenHeight float32
-					_padding1    float32 // Padding for vec4 alignment
-					_padding2    float32 // Padding for vec4 alignment
-					ColorR       float32
-					ColorG       float32
-					ColorB       float32
-					ColorA       float32
-				}
-				pushData := TextPushConstants{
-					ScreenWidth:  float32(swapExtent.Width),
-					ScreenHeight: float32(swapExtent.Height),
-					ColorR:       textComp.Color[0],
-					ColorG:       textComp.Color[1],
-					ColorB:       textComp.Color[2],
-					ColorA:       textComp.Color[3],
-				}
-				cmd.CmdPushConstants(
-					textPipelineLayout,
-					vk.SHADER_STAGE_VERTEX_BIT,
-					0,
-					32, // 32 bytes: vec2 (8) + padding (8) + vec4 (16)
-					unsafe.Pointer(&pushData),
-				)
+				for _, entity := range textEntities {
+					textComp := world.GetText(entity)
 
-				// Bind vertex and index buffers
-				cmd.BindVertexBuffers(0, []vk.Buffer{textVertexBuffer}, []uint64{0})
-				cmd.BindIndexBuffer(textIndexBuffer, 0, vk.INDEX_TYPE_UINT16)
+					// Generate text quads
+					vertices, indices := systems.GenerateTextQuads(textComp, sdfAtlas)
+					if len(vertices) == 0 {
+						continue
+					}
 
-				// Draw text
-				cmd.DrawIndexed(uint32(len(indices)), 1, 0, 0, 0)
-			}
+					// Upload vertices
+					vertexData := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*16)
+					err = device.UploadToBuffer(textVertexMemory, vertexData)
+					if err != nil {
+						panic(fmt.Sprintf("Text vertex upload failed: %v", err))
+					}
+
+					// Upload indices
+					indexData := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*2)
+					err = device.UploadToBuffer(textIndexMemory, indexData)
+					if err != nil {
+						panic(fmt.Sprintf("Text index upload failed: %v", err))
+					}
+
+					// Bind text pipeline
+					cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
+
+					// Bind descriptor set (SDF atlas)
+					cmd.BindDescriptorSets(
+						vk.PIPELINE_BIND_POINT_GRAPHICS,
+						textPipelineLayout,
+						0,
+						[]vk.DescriptorSet{textDescriptorSet},
+						nil,
+					)
+
+					// Set viewport and scissor
+					cmd.SetViewport(0, []vk.Viewport{
+						{
+							X:        0,
+							Y:        0,
+							Width:    float32(swapExtent.Width),
+							Height:   float32(swapExtent.Height),
+							MinDepth: 0.0,
+							MaxDepth: 1.0,
+						},
+					})
+					cmd.SetScissor(0, []vk.Rect2D{
+						{
+							Offset: vk.Offset2D{X: 0, Y: 0},
+							Extent: swapExtent,
+						},
+					})
+
+					// Push constants (screen size and text color)
+					// NOTE: Must match std140 layout - vec4 aligned to 16 bytes
+					type TextPushConstants struct {
+						ScreenWidth  float32
+						ScreenHeight float32
+						_padding1    float32 // Padding for vec4 alignment
+						_padding2    float32 // Padding for vec4 alignment
+						ColorR       float32
+						ColorG       float32
+						ColorB       float32
+						ColorA       float32
+					}
+					pushData := TextPushConstants{
+						ScreenWidth:  float32(swapExtent.Width),
+						ScreenHeight: float32(swapExtent.Height),
+						ColorR:       textComp.Color[0],
+						ColorG:       textComp.Color[1],
+						ColorB:       textComp.Color[2],
+						ColorA:       textComp.Color[3],
+					}
+					cmd.CmdPushConstants(
+						textPipelineLayout,
+						vk.SHADER_STAGE_VERTEX_BIT,
+						0,
+						32, // 32 bytes: vec2 (8) + padding (8) + vec4 (16)
+						unsafe.Pointer(&pushData),
+					)
+
+					// Bind vertex and index buffers
+					cmd.BindVertexBuffers(0, []vk.Buffer{textVertexBuffer}, []uint64{0})
+					cmd.BindIndexBuffer(textIndexBuffer, 0, vk.INDEX_TYPE_UINT16)
+
+					// Draw text
+					cmd.DrawIndexed(uint32(len(indices)), 1, 0, 0, 0)
+				}
+			*/
 
 			cmd.EndRendering()
 

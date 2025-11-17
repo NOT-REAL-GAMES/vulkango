@@ -119,3 +119,16 @@ func (w *World) QueryRenderablesSorted() []Entity {
 
 	return entities
 }
+
+// QueryUIButtons returns all entities that have a UIButton component.
+func (w *World) QueryUIButtons() []Entity {
+	result := make([]Entity, 0)
+
+	for entity := range w.entities {
+		if w.HasUIButton(entity) {
+			result = append(result, entity)
+		}
+	}
+
+	return result
+}

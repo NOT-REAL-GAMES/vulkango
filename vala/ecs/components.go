@@ -122,3 +122,66 @@ func NewText(content string, x, y, fontSize float32) *Text {
 		Visible:  true,
 	}
 }
+
+// UIButtonState represents the current state of a button
+type UIButtonState int
+
+const (
+	UIButtonNormal UIButtonState = iota
+	UIButtonHovered
+	UIButtonPressed
+)
+
+// UIButton component for interactive UI buttons.
+// Can be used in editor and in executable/game UIs.
+type UIButton struct {
+	// Bounds in screen space (pixels)
+	X, Y          float32
+	Width, Height float32
+
+	// Current state
+	State UIButtonState
+
+	// Was the button pressed (for detecting release)
+	WasPressed bool
+
+	// Colors for each state (RGBA, 0-1 range)
+	ColorNormal  [4]float32
+	ColorHovered [4]float32
+	ColorPressed [4]float32
+
+	// Callback function to execute when button is clicked (pressed then released while hovering)
+	OnClick func()
+
+	// Whether the button is enabled
+	Enabled bool
+
+	// Optional label
+	Label string
+
+	// Label text colors for each state (RGBA, 0-1 range)
+	LabelColor   [4]float32 // Normal state
+	LabelHovered [4]float32 // Hovered state
+	LabelPressed [4]float32 // Pressed state
+}
+
+// NewUIButton creates a default UI button with sensible defaults
+func NewUIButton(x, y, width, height float32, onClick func()) *UIButton {
+	return &UIButton{
+		X:            x,
+		Y:            y,
+		Width:        width,
+		Height:       height,
+		State:        UIButtonNormal,
+		WasPressed:   false,
+		ColorNormal:  [4]float32{0.3, 0.3, 0.3, 1.0}, // Dark gray
+		ColorHovered: [4]float32{0.5, 0.5, 0.5, 1.0}, // Light gray
+		ColorPressed: [4]float32{0.2, 0.4, 0.8, 1.0}, // Blue
+		OnClick:      onClick,
+		Enabled:      true,
+		Label:        "",
+		LabelColor:   [4]float32{1.0, 1.0, 1.0, 1.0}, // White
+		LabelHovered: [4]float32{1.0, 1.0, 1.0, 1.0}, // White
+		LabelPressed: [4]float32{1.0, 1.0, 1.0, 1.0}, // White
+	}
+}

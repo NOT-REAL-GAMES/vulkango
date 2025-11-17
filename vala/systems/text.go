@@ -16,7 +16,12 @@ type TextRenderer struct {
 	VertexMemory   vk.DeviceMemory
 	IndexBuffer    vk.Buffer
 	IndexMemory    vk.DeviceMemory
-	MaxChars       int // Maximum characters that can be rendered
+	// Staging buffers for dynamic text updates (CPU-visible)
+	StagingVertexBuffer vk.Buffer
+	StagingVertexMemory vk.DeviceMemory
+	StagingIndexBuffer  vk.Buffer
+	StagingIndexMemory  vk.DeviceMemory
+	MaxChars            int // Maximum characters that can be rendered
 }
 
 // TextVertex represents a vertex for text rendering

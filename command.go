@@ -412,6 +412,13 @@ func (cmd CommandBuffer) DrawIndexed(indexCount, instanceCount, firstIndex uint3
 
 // Add to command.go
 
+// BufferCopy describes a buffer copy region
+type BufferCopy struct {
+	SrcOffset uint64 // Starting offset in source buffer
+	DstOffset uint64 // Starting offset in destination buffer
+	Size      uint64 // Number of bytes to copy
+}
+
 // Buffer to Image Copy
 type BufferImageCopy struct {
 	BufferOffset      uint64
@@ -516,5 +523,52 @@ func (cmd CommandBuffer) CmdPushConstants(
 		C.uint32_t(offset),
 		C.uint32_t(size),
 		pValues,
+	)
+}
+
+// CmdUpdateBuffer updates a buffer's contents from host memory
+// dstOffset and dataSize are in bytes
+// This is useful for updating small amounts of buffer data (up to 65536 bytes)
+func (cmd CommandBuffer) CmdUpdateBuffer(
+	dstBuffer Buffer,
+	dstOffset uint64,
+	dataSize uint64,
+	pData unsafe.Pointer,
+) {
+	C.vkCmdUpdateBuffer(
+		cmd.handle,
+		dstBuffer.handle,
+		C.VkDeviceSize(dstOffset),
+		C.VkDeviceSize(dataSize),
+		pData,
+	)
+}
+
+// CmdCopyBuffer copies data between buffers
+// This can be used during a render pass (unlike CmdUpdateBuffer)
+func (cmd CommandBuffer) CmdCopyBuffer(
+	srcBuffer Buffer,
+	dstBuffer Buffer,
+	regions []BufferCopy,
+) {
+	if len(regions) == 0 {
+		return
+	}
+
+	cRegions := make([]C.VkBufferCopy, len(regions))
+	for i, region := range regions {
+		cRegions[i] = C.VkBufferCopy{
+			srcOffset: C.VkDeviceSize(region.SrcOffset),
+			dstOffset: C.VkDeviceSize(region.DstOffset),
+			size:      C.VkDeviceSize(region.Size),
+		}
+	}
+
+	C.vkCmdCopyBuffer(
+		cmd.handle,
+		srcBuffer.handle,
+		dstBuffer.handle,
+		C.uint32_t(len(cRegions)),
+		&cRegions[0],
 	)
 }

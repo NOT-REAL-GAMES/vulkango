@@ -355,30 +355,37 @@ type CompositeContext struct {
 
 // CompositeLayer draws a single layer's framebuffer to the swapchain using BINDLESS textures.
 // This is called during Pass 2 (compositing).
-func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX, offsetY, scale float32) {
+func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX, offsetY, scale, cameraX, cameraY, cameraZoom float32) {
 	// Bind composite pipeline
 	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, ctx.CompositePipeline)
 
-	// Push constants for layer transform, opacity, and texture index
+	// Push constants for layer transform, opacity, texture index, and camera
 	type PushConstants struct {
-		Opacity      float32
-		TextureIndex uint32
-		OffsetX      float32
-		OffsetY      float32
-		Scale        float32
+		Opacity       float32
+		TextureIndex  uint32
+		OffsetX       float32
+		OffsetY       float32
+		Scale         float32
+		_             float32 // Padding to align vec2 cameraOffset to 8-byte boundary
+		CameraOffsetX float32
+		CameraOffsetY float32
+		CameraZoom    float32
 	}
 	pushData := PushConstants{
-		Opacity:      opacity,
-		TextureIndex: textureIndex,
-		OffsetX:      offsetX,
-		OffsetY:      offsetY,
-		Scale:        scale,
+		Opacity:       opacity,
+		TextureIndex:  textureIndex,
+		OffsetX:       offsetX,
+		OffsetY:       offsetY,
+		Scale:         scale,
+		CameraOffsetX: cameraX,
+		CameraOffsetY: cameraY,
+		CameraZoom:    cameraZoom,
 	}
 	ctx.CommandBuffer.CmdPushConstants(
 		ctx.CompositePipelineLayout,
 		vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
 		0,
-		20, // opacity(4) + textureIndex(4) + offsetX(4) + offsetY(4) + scale(4) = 20 bytes
+		36, // opacity(4) + textureIndex(4) + offsetX(4) + offsetY(4) + scale(4) + padding(4) + cameraOffsetX(4) + cameraOffsetY(4) + cameraZoom(4) = 36 bytes
 		unsafe.Pointer(&pushData),
 	)
 

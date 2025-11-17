@@ -20,6 +20,7 @@ type World struct {
 	blendModes      map[Entity]*BlendMode
 	textureData     map[Entity]*TextureData
 	texts           map[Entity]*Text
+	uiButtons       map[Entity]*UIButton
 
 	// Track all living entities for iteration
 	entities map[Entity]bool
@@ -35,6 +36,7 @@ func NewWorld() *World {
 		blendModes:      make(map[Entity]*BlendMode),
 		textureData:     make(map[Entity]*TextureData),
 		texts:           make(map[Entity]*Text),
+		uiButtons:       make(map[Entity]*UIButton),
 		entities:        make(map[Entity]bool),
 	}
 }
@@ -219,4 +221,23 @@ func (w *World) HasText(e Entity) bool {
 
 func (w *World) RemoveText(e Entity) {
 	delete(w.texts, e)
+}
+
+// ===== UIButton Component =====
+
+func (w *World) AddUIButton(e Entity, b *UIButton) {
+	w.uiButtons[e] = b
+}
+
+func (w *World) GetUIButton(e Entity) *UIButton {
+	return w.uiButtons[e]
+}
+
+func (w *World) HasUIButton(e Entity) bool {
+	_, exists := w.uiButtons[e]
+	return exists
+}
+
+func (w *World) RemoveUIButton(e Entity) {
+	delete(w.uiButtons, e)
 }
