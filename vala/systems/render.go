@@ -355,7 +355,7 @@ type CompositeContext struct {
 
 // CompositeLayer draws a single layer's framebuffer to the swapchain using BINDLESS textures.
 // This is called during Pass 2 (compositing).
-func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX, offsetY, scale, cameraX, cameraY, cameraZoom float32) {
+func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX, offsetY, scale, cameraX, cameraY, cameraZoom float32, screenSpace bool) {
 	// Bind composite pipeline
 	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, ctx.CompositePipeline)
 
@@ -370,7 +370,17 @@ func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX
 		CameraOffsetX float32
 		CameraOffsetY float32
 		CameraZoom    float32
+		ScreenSpace   uint32  // 1 = screen space (ignore camera), 0 = world space
+		_padding1     float32 // Padding to align to 16-byte boundary
+		_padding2     float32 // Padding to align to 16-byte boundary
 	}
+
+	// Convert bool to uint32 (0 or 1)
+	screenSpaceUint := uint32(0)
+	if screenSpace {
+		screenSpaceUint = 1
+	}
+
 	pushData := PushConstants{
 		Opacity:       opacity,
 		TextureIndex:  textureIndex,
@@ -380,12 +390,13 @@ func CompositeLayer(ctx *CompositeContext, textureIndex uint32, opacity, offsetX
 		CameraOffsetX: cameraX,
 		CameraOffsetY: cameraY,
 		CameraZoom:    cameraZoom,
+		ScreenSpace:   screenSpaceUint,
 	}
 	ctx.CommandBuffer.CmdPushConstants(
 		ctx.CompositePipelineLayout,
 		vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
 		0,
-		36, // opacity(4) + textureIndex(4) + offsetX(4) + offsetY(4) + scale(4) + padding(4) + cameraOffsetX(4) + cameraOffsetY(4) + cameraZoom(4) = 36 bytes
+		48, // opacity(4) + textureIndex(4) + offsetX(4) + offsetY(4) + scale(4) + padding(4) + cameraOffsetX(4) + cameraOffsetY(4) + cameraZoom(4) + screenSpace(4) + padding(8) = 48 bytes (aligned to 16)
 		unsafe.Pointer(&pushData),
 	)
 

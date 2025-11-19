@@ -1357,6 +1357,7 @@ type ColorSpaceKHR int32
 type PresentModeKHR int32
 type SurfaceTransformFlagsKHR uint32
 type CompositeAlphaFlagsKHR uint32
+type ImageCreateFlags uint32
 type ImageUsageFlags uint32
 
 const (
@@ -1372,6 +1373,10 @@ const (
 	PRESENT_MODE_MAILBOX_KHR      PresentModeKHR = C.VK_PRESENT_MODE_MAILBOX_KHR
 	PRESENT_MODE_FIFO_KHR         PresentModeKHR = C.VK_PRESENT_MODE_FIFO_KHR
 	PRESENT_MODE_FIFO_RELAXED_KHR PresentModeKHR = C.VK_PRESENT_MODE_FIFO_RELAXED_KHR
+
+	// Image create flags
+	IMAGE_CREATE_SPARSE_BINDING_BIT   ImageCreateFlags = C.VK_IMAGE_CREATE_SPARSE_BINDING_BIT
+	IMAGE_CREATE_SPARSE_RESIDENCY_BIT ImageCreateFlags = C.VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT
 
 	// Image usage
 	IMAGE_USAGE_COLOR_ATTACHMENT_BIT ImageUsageFlags = C.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
@@ -1428,12 +1433,15 @@ type DeviceCreateInfo struct {
 	QueueCreateInfos      []DeviceQueueCreateInfo
 	EnabledLayerNames     []string
 	EnabledExtensionNames []string
+	EnabledFeatures       *PhysicalDeviceFeatures
 	Vulkan12Features      *PhysicalDeviceVulkan12Features
 	Vulkan13Features      *PhysicalDeviceVulkan13Features
 }
 
 type PhysicalDeviceFeatures struct {
-	// We'll leave this empty for now - can add fields as needed
+	SparseBinding          bool
+	SparseResidencyImage2D bool
+	// Add more features as needed
 }
 
 // Image view types

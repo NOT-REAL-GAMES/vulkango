@@ -13,6 +13,7 @@ type Sampler struct {
 }
 
 type ImageCreateInfo struct {
+	Flags         ImageCreateFlags
 	ImageType     ImageType
 	Format        Format
 	Extent        Extent3D
@@ -67,7 +68,7 @@ func (device Device) CreateImage(createInfo *ImageCreateInfo) (Image, error) {
 
 	cInfo.sType = C.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
 	cInfo.pNext = nil
-	cInfo.flags = 0
+	cInfo.flags = C.VkImageCreateFlags(createInfo.Flags)
 	cInfo.imageType = C.VkImageType(createInfo.ImageType)
 	cInfo.format = C.VkFormat(createInfo.Format)
 	cInfo.extent.width = C.uint32_t(createInfo.Extent.Width)

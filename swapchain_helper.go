@@ -47,7 +47,7 @@ func ChooseSurfaceFormat(availableFormats []SurfaceFormatKHR) SurfaceFormatKHR {
 func ChoosePresentMode(availableModes []PresentModeKHR) PresentModeKHR {
 	// Prefer mailbox (triple buffering) for lowest latency without tearing
 	for _, mode := range availableModes {
-		if mode == PRESENT_MODE_FIFO_KHR {
+		if mode == PRESENT_MODE_IMMEDIATE_KHR {
 			return mode
 		}
 	}

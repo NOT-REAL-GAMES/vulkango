@@ -185,3 +185,19 @@ func NewUIButton(x, y, width, height float32, onClick func()) *UIButton {
 		LabelPressed: [4]float32{1.0, 1.0, 1.0, 1.0}, // White
 	}
 }
+
+// ScreenSpace component marks entities that should remain in screen space,
+// unaffected by camera panning and zooming. Useful for UI elements, HUD,
+// and other overlays that should stay fixed on screen.
+type ScreenSpace struct {
+	// If true, entity ignores camera transforms completely (stays in screen space)
+	// If false, entity uses world space (affected by camera pan/zoom)
+	Enabled bool
+}
+
+// NewScreenSpace creates a ScreenSpace component with enabled=true by default
+func NewScreenSpace() *ScreenSpace {
+	return &ScreenSpace{
+		Enabled: true,
+	}
+}

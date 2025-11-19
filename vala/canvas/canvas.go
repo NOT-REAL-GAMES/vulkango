@@ -54,6 +54,11 @@ type Canvas interface {
 	// This handles staging buffers and transfers
 	Upload(x, y, width, height uint32, data []byte) error
 
+	// Download reads pixel data from a region
+	// Returns data in the canvas's pixel format
+	// This handles staging buffers and transfers from GPU to CPU
+	Download(x, y, width, height uint32) ([]byte, error)
+
 	// Clear fills a region with a color
 	Clear(x, y, width, height uint32, r, g, b, a float32) error
 

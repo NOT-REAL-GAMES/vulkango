@@ -132,3 +132,18 @@ func (w *World) QueryUIButtons() []Entity {
 
 	return result
 }
+
+// QueryScreenSpaceEntities returns all entities that have a ScreenSpace component
+// with Enabled=true. These entities should not be affected by camera transforms.
+func (w *World) QueryScreenSpaceEntities() []Entity {
+	result := make([]Entity, 0)
+
+	for entity := range w.entities {
+		screenSpace := w.GetScreenSpace(entity)
+		if screenSpace != nil && screenSpace.Enabled {
+			result = append(result, entity)
+		}
+	}
+
+	return result
+}

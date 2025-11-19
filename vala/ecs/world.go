@@ -21,6 +21,7 @@ type World struct {
 	textureData     map[Entity]*TextureData
 	texts           map[Entity]*Text
 	uiButtons       map[Entity]*UIButton
+	screenSpaces    map[Entity]*ScreenSpace
 
 	// Track all living entities for iteration
 	entities map[Entity]bool
@@ -37,6 +38,7 @@ func NewWorld() *World {
 		textureData:     make(map[Entity]*TextureData),
 		texts:           make(map[Entity]*Text),
 		uiButtons:       make(map[Entity]*UIButton),
+		screenSpaces:    make(map[Entity]*ScreenSpace),
 		entities:        make(map[Entity]bool),
 	}
 }
@@ -59,6 +61,9 @@ func (w *World) DeleteEntity(entity Entity) {
 	delete(w.vulkanPipelines, entity)
 	delete(w.blendModes, entity)
 	delete(w.textureData, entity)
+	delete(w.texts, entity)
+	delete(w.uiButtons, entity)
+	delete(w.screenSpaces, entity)
 }
 
 // EntityExists checks if an entity ID is valid and alive.
@@ -240,4 +245,63 @@ func (w *World) HasUIButton(e Entity) bool {
 
 func (w *World) RemoveUIButton(e Entity) {
 	delete(w.uiButtons, e)
+}
+
+// ===== ScreenSpace Component =====
+
+func (w *World) AddScreenSpace(e Entity, s *ScreenSpace) {
+	if !w.EntityExists(e) {
+		panic(fmt.Sprintf("entity %d does not exist", e))
+	}
+	w.screenSpaces[e] = s
+}
+
+func (w *World) GetScreenSpace(e Entity) *ScreenSpace {
+	return w.screenSpaces[e]
+}
+
+func (w *World) HasScreenSpace(e Entity) bool {
+	_, exists := w.screenSpaces[e]
+	return exists
+}
+
+func (w *World) RemoveScreenSpace(e Entity) {
+	delete(w.screenSpaces, e)
+}
+
+// SetScreenSpace is a convenience function that adds or updates the ScreenSpace component
+func (w *World) SetScreenSpace(e Entity, enabled bool) {
+	screenSpace := w.GetScreenSpace(e)
+	if screenSpace == nil {
+		w.AddScreenSpace(e, &ScreenSpace{Enabled: enabled})
+	} else {
+		screenSpace.Enabled = enabled
+	}
+}
+
+// MakeScreenSpace marks an entity as screen-space and optionally all UI buttons in the world.
+// If includeButtons is true, all entities with UIButton components will also be marked as screen-space.
+// This is useful for creating HUD layers where both the layer and its buttons should stay fixed on screen.
+func (w *World) MakeScreenSpace(entity Entity, includeButtons bool) {
+	w.SetScreenSpace(entity, true)
+
+	if includeButtons {
+		buttons := w.QueryUIButtons()
+		for _, buttonEntity := range buttons {
+			w.SetScreenSpace(buttonEntity, true)
+		}
+	}
+}
+
+// MakeScreenSpaceWithEntities marks an entity and a list of related entities (like buttons)
+// as screen-space. This is more precise than MakeScreenSpace when you want to control
+// exactly which entities should be in screen space.
+//
+// Example:
+//   world.MakeScreenSpaceWithEntities(hudLayer, button1, button2, button3)
+func (w *World) MakeScreenSpaceWithEntities(entity Entity, relatedEntities ...Entity) {
+	w.SetScreenSpace(entity, true)
+	for _, e := range relatedEntities {
+		w.SetScreenSpace(e, true)
+	}
 }

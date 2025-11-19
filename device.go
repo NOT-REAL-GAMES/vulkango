@@ -36,6 +36,16 @@ func (physicalDevice PhysicalDevice) GetQueueFamilyProperties() []QueueFamilyPro
 	return goProps
 }
 
+func (physicalDevice PhysicalDevice) GetFeatures() PhysicalDeviceFeatures {
+	var cFeatures C.VkPhysicalDeviceFeatures
+	C.vkGetPhysicalDeviceFeatures(physicalDevice.handle, &cFeatures)
+
+	return PhysicalDeviceFeatures{
+		SparseBinding:          cFeatures.sparseBinding == C.VK_TRUE,
+		SparseResidencyImage2D: cFeatures.sparseResidencyImage2D == C.VK_TRUE,
+	}
+}
+
 func (physicalDevice PhysicalDevice) GetSurfaceSupportKHR(queueFamilyIndex uint32, surface SurfaceKHR) (bool, error) {
 	var supported C.VkBool32
 	result := C.vkGetPhysicalDeviceSurfaceSupportKHR(
@@ -58,6 +68,7 @@ type deviceCreateData struct {
 	queuePriorities  [][]C.float
 	layers           []*C.char
 	extensions       []*C.char
+	features         *C.VkPhysicalDeviceFeatures
 	features12       *C.VkPhysicalDeviceVulkan12Features
 	features13       *C.VkPhysicalDeviceVulkan13Features
 }
@@ -149,8 +160,21 @@ func (info *DeviceCreateInfo) vulkanize() *deviceCreateData {
 
 	data.cInfo.pNext = pNext
 
-	// Features (null for now)
-	data.cInfo.pEnabledFeatures = nil
+	// Setup basic features
+	if info.EnabledFeatures != nil {
+		data.features = (*C.VkPhysicalDeviceFeatures)(C.calloc(1, C.sizeof_VkPhysicalDeviceFeatures))
+
+		if info.EnabledFeatures.SparseBinding {
+			data.features.sparseBinding = C.VK_TRUE
+		}
+		if info.EnabledFeatures.SparseResidencyImage2D {
+			data.features.sparseResidencyImage2D = C.VK_TRUE
+		}
+
+		data.cInfo.pEnabledFeatures = data.features
+	} else {
+		data.cInfo.pEnabledFeatures = nil
+	}
 
 	return data
 }
@@ -162,6 +186,10 @@ func (data *deviceCreateData) free() {
 
 	for _, ext := range data.extensions {
 		C.free(unsafe.Pointer(ext))
+	}
+
+	if data.features != nil {
+		C.free(unsafe.Pointer(data.features))
 	}
 
 	if data.features12 != nil {

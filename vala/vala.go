@@ -97,6 +97,7 @@ layout(push_constant) uniform LayerPushConstants {
     float scale;         // Layer scale
     vec2 cameraOffset;   // Camera pan offset
     float cameraZoom;    // Camera zoom level
+    uint screenSpace;    // 1 = screen space (ignore camera), 0 = world space
 } layer;
 
 layout(location = 0) out vec2 fragTexCoord;
@@ -104,8 +105,12 @@ layout(location = 0) out vec2 fragTexCoord;
 void main() {
     // Apply layer transform first
     vec2 pos = positions[gl_VertexIndex] * layer.scale + layer.offset;
-    // Then apply camera transform (pan and zoom)
-    pos = (pos - layer.cameraOffset) * layer.cameraZoom;
+
+    // Apply camera transform only if NOT in screen space
+    if (layer.screenSpace == 0u) {
+        pos = (pos - layer.cameraOffset) * layer.cameraZoom;
+    }
+
     gl_Position = vec4(pos, 0.0, 1.0);
     fragTexCoord = texCoords[gl_VertexIndex];
 }
@@ -182,6 +187,7 @@ layout(push_constant) uniform BrushPushConstants {
 } brush;
 
 layout(location = 0) out vec2 fragLocalPos; // Position within brush quad (0-1)
+layout(location = 1) out vec2 fragCanvasUV; // UV coordinates for canvas texture (0-1)
 
 void main() {
     // Calculate brush quad corners in canvas pixels
@@ -191,8 +197,12 @@ void main() {
     // Convert to NDC (-1 to 1)
     vec2 ndc = (canvasPos / brush.canvasSize) * 2.0 - 1.0;
 
+    // Calculate UV coordinates for canvas sampling
+    vec2 canvasUV = canvasPos / brush.canvasSize;
+
     gl_Position = vec4(ndc, 0.0, 1.0);
     fragLocalPos = quadPos;
+    fragCanvasUV = canvasUV;
 }
 `
 
@@ -200,6 +210,7 @@ const brushFragmentShader = `
 #version 450
 
 layout(location = 0) in vec2 fragLocalPos; // 0,0 to 1,1
+layout(location = 1) in vec2 fragCanvasUV;  // UV for canvas texture
 
 layout(push_constant) uniform BrushPushConstants {
     vec2 canvasSize;
@@ -208,6 +219,9 @@ layout(push_constant) uniform BrushPushConstants {
     float brushOpacity;
     vec4 brushColor;
 } brush;
+
+// Canvas texture for reading existing content (for blending)
+layout(set = 0, binding = 0) uniform sampler2D canvasTexture;
 
 layout(location = 0) out vec4 outColor;
 
@@ -219,13 +233,24 @@ void main() {
     // Circular brush with soft edges
     float radius = 0.5;
     float softness = 0.1;
-    float alpha = 1.0 - smoothstep(radius - softness, radius, dist);
+    float brushAlpha = 1.0 - smoothstep(radius - softness, radius, dist);
+
+	if (brush.brushSize < 1.0) {brushAlpha *= 10.0;}
 
     // Apply brush opacity
-    alpha *= brush.brushOpacity;
+    brushAlpha *= brush.brushOpacity;
 
-    // Output color with alpha
-    outColor = vec4(brush.brushColor.rgb, brush.brushColor.a);
+    // Sample existing canvas content
+    vec4 canvasColor = texture(canvasTexture, fragCanvasUV);
+
+    // Manual alpha blending: blend brush color over existing canvas
+    // Formula: outColor = src * srcAlpha + dst * (1 - srcAlpha)
+    vec4 brushColor = vec4(brush.brushColor.rgb, brushAlpha * brush.brushColor.a);
+    float srcAlpha = brushColor.a;
+
+    // Blend brush over existing canvas content
+    outColor = brushColor * srcAlpha + canvasColor * (1.0 - srcAlpha);
+    outColor.a = max(canvasColor.a, brushColor.a); // Preserve maximum alpha
 }
 `
 
@@ -793,7 +818,17 @@ func main() {
 
 		fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
 
-		// Create device
+		// Query physical device features to check for sparse binding support
+		features := physicalDevice.GetFeatures()
+		fmt.Printf("\nSparse binding support:\n")
+		fmt.Printf("  sparseBinding: %v\n", features.SparseBinding)
+		fmt.Printf("  sparseResidencyImage2D: %v\n", features.SparseResidencyImage2D)
+
+		if !features.SparseBinding || !features.SparseResidencyImage2D {
+			fmt.Println("WARNING: Sparse binding not supported! Falling back to dense canvas.")
+		}
+
+		// Create device with sparse binding enabled
 		device, err := physicalDevice.CreateDevice(&vk.DeviceCreateInfo{
 			QueueCreateInfos: []vk.DeviceQueueCreateInfo{
 				{
@@ -804,6 +839,10 @@ func main() {
 			EnabledExtensionNames: []string{
 				"VK_KHR_swapchain",
 				"VK_EXT_blend_operation_advanced",
+			},
+			EnabledFeatures: &vk.PhysicalDeviceFeatures{
+				SparseBinding:          features.SparseBinding,          // Enable sparse binding
+				SparseResidencyImage2D: features.SparseResidencyImage2D, // Enable sparse residency for 2D images
 			},
 			Vulkan12Features: &vk.PhysicalDeviceVulkan12Features{
 				DescriptorIndexing:                        true, // Enable descriptor indexing for bindless textures
@@ -1168,7 +1207,7 @@ func main() {
 				{
 					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
 					Offset:     0,
-					Size:       36, // opacity(4) + textureIndex(4) + offset(8) + scale(4) + padding(4) + cameraOffset(8) + cameraZoom(4) = 36 bytes
+					Size:       48, // opacity(4) + textureIndex(4) + offset(8) + scale(4) + padding(4) + cameraOffset(8) + cameraZoom(4) + screenSpace(4) + padding(8) = 48 bytes (16-byte aligned)
 				},
 			},
 		})
@@ -1256,9 +1295,26 @@ func main() {
 		}
 		defer device.DestroyShaderModule(brushFragShader)
 
+		// Create descriptor set layout for canvas texture sampling
+		brushDescriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Bindings: []vk.DescriptorSetLayoutBinding{
+				{
+					Binding:         0,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: 1,
+					StageFlags:      vk.SHADER_STAGE_FRAGMENT_BIT,
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorSetLayout(brushDescriptorSetLayout)
+
 		// Brush push constants: vec2 canvasSize, vec2 brushPos, float size, float opacity, vec4 color
 		// Total: 8 + 8 + 4 + 4 + 16 = 40 bytes
 		brushPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			SetLayouts: []vk.DescriptorSetLayout{brushDescriptorSetLayout},
 			PushConstantRanges: []vk.PushConstantRange{
 				{
 					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
@@ -1340,6 +1396,32 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyPipeline(brushPipeline)
+
+		// Create descriptor pool for brush canvas texture
+		brushDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			MaxSets: 1,
+			PoolSizes: []vk.DescriptorPoolSize{
+				{
+					Type:            vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					DescriptorCount: 1,
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyDescriptorPool(brushDescriptorPool)
+
+		// Allocate descriptor set for brush canvas texture
+		brushDescriptorSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+			DescriptorPool: brushDescriptorPool,
+			SetLayouts:     []vk.DescriptorSetLayout{brushDescriptorSetLayout},
+		})
+		if err != nil {
+			panic(err)
+		}
+		brushDescriptorSet := brushDescriptorSets[0]
+		// Will be updated after canvas creation to bind source canvas texture
 
 		fmt.Println("Brush pipeline created!")
 
@@ -1602,37 +1684,69 @@ func main() {
 		defer device.DestroyCommandPool(commandPool)
 
 		// Create paint canvas
-		fmt.Println("\nCreating paint canvas...")
-		paintCanvas, err := canvas.New(canvas.Config{
+		fmt.Println("\nCreating paint canvases (ping-pong buffers)...")
+
+		// Canvas A - Front buffer
+		paintCanvasA, err := canvas.New(canvas.Config{
 			Device:         device,
 			PhysicalDevice: physicalDevice,
-			Width:          2048,
-			Height:         2048,
+			Width:          8192,
+			Height:         8192,
 			Format:         vk.FORMAT_R8G8B8A8_UNORM,
 			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
 				vk.IMAGE_USAGE_SAMPLED_BIT |
-				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-			UseSparseBinding: false, // Start with dense allocation
+				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+				vk.IMAGE_USAGE_TRANSFER_SRC_BIT, // Add TRANSFER_SRC for Download
+			UseSparseBinding: true, // SPARSE BINDING ENABLED! RTX 2000+ only
 		}, commandPool, queue)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to create paint canvas: %v", err))
+			panic(fmt.Sprintf("Failed to create paint canvas A: %v", err))
 		}
-		defer paintCanvas.Destroy()
-		fmt.Printf("Paint canvas created: %dx%d\n", paintCanvas.GetWidth(), paintCanvas.GetHeight())
+		defer paintCanvasA.Destroy()
 
-		// Clear canvas to white
-		whitePixels := make([]byte, 2048*2048*4)
+		// Canvas B - Back buffer
+		paintCanvasB, err := canvas.New(canvas.Config{
+			Device:         device,
+			PhysicalDevice: physicalDevice,
+			Width:          8192,
+			Height:         8192,
+			Format:         vk.FORMAT_R8G8B8A8_UNORM,
+			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
+				vk.IMAGE_USAGE_SAMPLED_BIT |
+				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+				vk.IMAGE_USAGE_TRANSFER_SRC_BIT,
+			UseSparseBinding: true,
+		}, commandPool, queue)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create paint canvas B: %v", err))
+		}
+		defer paintCanvasB.Destroy()
+
+		fmt.Printf("Paint canvases created: %dx%d (ping-pong buffers)\n", paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
+
+		// Clear both canvases to white
+		whitePixels := make([]byte, 8192*8192*4)
 		for i := 0; i < len(whitePixels); i += 4 {
 			whitePixels[i] = 255   // R
 			whitePixels[i+1] = 255 // G
 			whitePixels[i+2] = 255 // B
 			whitePixels[i+3] = 255 // A
 		}
-		err = paintCanvas.Upload(0, 0, 2048, 2048, whitePixels)
+		err = paintCanvasA.Upload(0, 0, 8192, 8192, whitePixels)
 		if err != nil {
-			panic(fmt.Sprintf("Failed to clear canvas: %v", err))
+			panic(fmt.Sprintf("Failed to clear canvas A: %v", err))
 		}
-		fmt.Println("Canvas cleared to white")
+		err = paintCanvasB.Upload(0, 0, 8192, 8192, whitePixels)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to clear canvas B: %v", err))
+		}
+		fmt.Println("Both canvases cleared to white")
+
+		// Note: No GPU undo buffer needed - using action-based undo with stroke replay
+
+		// Ping-pong state: tracks which canvas is source (read) and which is destination (write)
+		paintCanvas := paintCanvasA       // Start with A as current (destination)
+		paintCanvasSource := paintCanvasB // B is source for first frame
 
 		// Create sampler for paint canvas
 		canvasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
@@ -1648,6 +1762,25 @@ func main() {
 			panic(fmt.Sprintf("Failed to create canvas sampler: %v", err))
 		}
 		defer device.DestroySampler(canvasSampler)
+
+		// Update brush descriptor set to bind source canvas texture
+		// This will be updated each frame to bind the correct source canvas
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          brushDescriptorSet,
+				DstBinding:      0,
+				DstArrayElement: 0,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{
+					{
+						Sampler:     canvasSampler,
+						ImageView:   paintCanvasSource.GetView(),
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					},
+				},
+			},
+		})
+		fmt.Println("Brush descriptor set updated with source canvas texture")
 
 		fmt.Println("\nCreating texture...")
 
@@ -2548,17 +2681,82 @@ func main() {
 		world.AddText(helloText, textComponent)
 		fmt.Println("Created Hello World text entity")
 
-		// Create test UI button
+		// === Action-based Undo System ===
+		// Unified undo/redo for strokes and layer operations
+		actionRecorder := NewActionRecorder()
+		var currentStroke []PenState // Currently drawing stroke
+		var replayRequested bool     // Trigger full replay
+		// Create test UI button (toggles layer2 visibility with undo support)
 		testButton := world.CreateEntity()
 		buttonComponent := ecs.NewUIButton(300.0, 200.0, 150.0, 50.0, func() {
-			fmt.Println("Button clicked!")
+			// Toggle layer2 visibility and record it in undo history
+			blendMode := world.GetBlendMode(layer2)
+			if blendMode != nil {
+				oldVisible := blendMode.Visible
+				newVisible := !oldVisible
+				blendMode.Visible = newVisible
+				actionRecorder.RecordLayerVisibility(layer2, oldVisible, newVisible)
+			}
 		})
-		buttonComponent.Label = "Click Me"
+		buttonComponent.Label = "Toggle Layer"
 		buttonComponent.LabelColor = [4]float32{0.0, 0.0, 0.0, 1.0}
 		buttonComponent.LabelHovered = [4]float32{0.0, 0.0, 0.0, 1.0}
 		buttonComponent.LabelPressed = [4]float32{1.0, 0.0, 0.0, 1.0}
 		world.AddUIButton(testButton, buttonComponent)
 		fmt.Println("Created test button entity")
+
+		// Create Undo button (action-based)
+		undoButton := world.CreateEntity()
+		undoButtonComponent := ecs.NewUIButton(10.0, 10.0, 80.0, 40.0, func() {
+			if actionRecorder.Undo() {
+				replayRequested = true
+			}
+		})
+		undoButtonComponent.Label = "Undo"
+		undoButtonComponent.LabelColor = [4]float32{1.0, 1.0, 1.0, 1.0}   // White
+		undoButtonComponent.LabelHovered = [4]float32{1.0, 1.0, 1.0, 1.0} // White
+		undoButtonComponent.LabelPressed = [4]float32{0.8, 0.8, 1.0, 1.0} // Light blue
+		undoButtonComponent.ColorNormal = [4]float32{0.2, 0.2, 0.2, 0.9}  // Dark gray
+		undoButtonComponent.ColorHovered = [4]float32{0.3, 0.3, 0.3, 0.9} // Lighter gray
+		undoButtonComponent.ColorPressed = [4]float32{0.1, 0.2, 0.5, 0.9} // Blue
+		world.AddUIButton(undoButton, undoButtonComponent)
+		world.AddScreenSpace(undoButton, ecs.NewScreenSpace()) // Make it screen-space
+		fmt.Printf("=== UNDO BUTTON CREATED: Entity=%d, Position=(%.1f,%.1f), Size=(%.1f×%.1f) ===\n",
+			undoButton, undoButtonComponent.X, undoButtonComponent.Y, undoButtonComponent.Width, undoButtonComponent.Height)
+
+		// Create Redo button (action-based)
+		redoButton := world.CreateEntity()
+		redoButtonComponent := ecs.NewUIButton(100.0, 10.0, 80.0, 40.0, func() {
+			if actionRecorder.Redo() {
+				replayRequested = true
+			}
+		})
+		redoButtonComponent.Label = "Redo"
+		redoButtonComponent.LabelColor = [4]float32{1.0, 1.0, 1.0, 1.0}   // White
+		redoButtonComponent.LabelHovered = [4]float32{1.0, 1.0, 1.0, 1.0} // White
+		redoButtonComponent.LabelPressed = [4]float32{0.8, 0.8, 1.0, 1.0} // Light blue
+		redoButtonComponent.ColorNormal = [4]float32{0.2, 0.2, 0.2, 0.9}  // Dark gray
+		redoButtonComponent.ColorHovered = [4]float32{0.3, 0.3, 0.3, 0.9} // Lighter gray
+		redoButtonComponent.ColorPressed = [4]float32{0.1, 0.2, 0.5, 0.9} // Blue
+		world.AddUIButton(redoButton, redoButtonComponent)
+		world.AddScreenSpace(redoButton, ecs.NewScreenSpace()) // Make it screen-space
+		fmt.Println("Created redo button entity")
+
+		// Debug: Print all created buttons
+		fmt.Println("\n=== ALL BUTTONS CREATED ===")
+		for _, entity := range world.QueryUIButtons() {
+			btn := world.GetUIButton(entity)
+			screenSp := world.GetScreenSpace(entity)
+			isScreenSpace := screenSp != nil && screenSp.Enabled
+			fmt.Printf("  Entity %d: '%s' at (%.0f,%.0f) size %.0f×%.0f, Enabled=%v, ScreenSpace=%v\n",
+				entity, btn.Label, btn.X, btn.Y, btn.Width, btn.Height, btn.Enabled, isScreenSpace)
+		}
+		fmt.Println("===========================\n")
+
+		screenSpace := ecs.NewScreenSpace()
+		screenSpace.Enabled = true
+
+		//world.AddScreenSpace(testButton, screenSpace)
 
 		// === UI Layer Z-Index Constants ===
 		// Reserve top 16 Z-indices for UI layers (0x7ffff0 to 0x7fffff)
@@ -2677,6 +2875,9 @@ func main() {
 		defer device.DestroyImageView(uiButtonTextView)
 		defer device.FreeMemory(uiButtonTextMem)
 
+		world.MakeScreenSpace(uiButtonBaseLayer, true)
+		world.MakeScreenSpace(uiButtonTextLayer, true)
+
 		// Note: Old uiLayer variable removed - now using uiButtonBaseLayer and uiButtonTextLayer
 		fmt.Printf("Created %d UI layers for multi-layer rendering\n", 2)
 
@@ -2794,6 +2995,15 @@ func main() {
 		penPressure := float32(0.0)
 		prevPenPressure := float32(0.0)
 		penDown := false
+		prevPenDown := false // Track pen state transitions for undo/redo
+
+		// GPU undo state and stroke bounds already declared above (before buttons)
+
+		// Stroke tracking
+		strokeActive := false
+		isFirstFrameOfStroke := false // Skip interpolation on first frame to avoid (0,0) jolt
+		strokeFrameCount := 0         // Count frames since stroke start for Bezier dampening
+		brushRadius := float32(200.0) // Current brush radius (scaled for 8K canvas)
 
 		// Mouse state tracking for UI
 		mouseX := float32(0.0)
@@ -2811,8 +3021,10 @@ func main() {
 		currentLayer := -4999999
 
 		imageIndexLast := uint32(0)
+		frameCounter := uint64(0) // For periodic debug logging
 
 		for running {
+			frameCounter++
 
 			l2tx := world.GetTransform(layer2).X
 			l2ty := world.GetTransform(layer2).Y
@@ -2828,6 +3040,10 @@ func main() {
 					axis := event.PenAxis
 					if axis.Axis == sdl.PEN_AXIS_PRESSURE {
 						penPressure = axis.Value
+						// Ensure minimum pressure for visibility (pen tablets sometimes report low values)
+						/*if penPressure < 0.1 {
+							penPressure = 1.0
+						}*/
 					}
 				case sdl.EVENT_PEN_MOTION:
 					motion := event.PenMotion
@@ -2901,6 +3117,60 @@ func main() {
 					cameraX = worldX - mouseNDCX/cameraZoom
 					cameraY = worldY - mouseNDCY/cameraZoom
 
+				case sdl.EVENT_KEY_DOWN:
+					keyEvent := event.Keyboard
+					ctrl := (keyEvent.Mod & sdl.KMOD_CTRL) != 0
+					shift := (keyEvent.Mod & sdl.KMOD_SHIFT) != 0
+
+					// Ctrl+Z - Undo
+					if ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Z {
+						if actionRecorder.Undo() {
+							replayRequested = true
+							fmt.Println("Undo successful")
+						}
+					}
+
+					// Ctrl+Shift+Z or Ctrl+Y - Redo
+					if (ctrl && shift && keyEvent.Scancode == sdl.SCANCODE_Z) ||
+						(ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Y) {
+						if actionRecorder.Redo() {
+							replayRequested = true
+							fmt.Println("Redo successful")
+						}
+					}
+
+					// Up arrow - Increase layer2 opacity (example of OpacityAction)
+					if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_UP {
+						blendMode := world.GetBlendMode(layer2)
+						if blendMode != nil {
+							oldOpacity := blendMode.Opacity
+							newOpacity := oldOpacity + 0.1
+							if newOpacity > 1.0 {
+								newOpacity = 1.0
+								break
+							}
+							blendMode.Opacity = newOpacity
+							actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
+							fmt.Printf("Layer opacity increased to %.2f\n", newOpacity)
+						}
+					}
+
+					// Down arrow - Decrease layer2 opacity
+					if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_DOWN {
+						blendMode := world.GetBlendMode(layer2)
+						if blendMode != nil {
+							oldOpacity := blendMode.Opacity
+							newOpacity := oldOpacity - 0.1
+							if newOpacity < 0.0 {
+								newOpacity = 0.0
+								break
+							}
+							blendMode.Opacity = newOpacity
+							actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
+							fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
+						}
+					}
+
 				case sdl.EVENT_DROP_COMPLETE:
 					fmt.Printf("File loaded!")
 
@@ -2949,14 +3219,7 @@ func main() {
 			world.AddText(helloText, textComp)
 
 			// Update UI button states
-			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
 			// Animate layer2 in a circle
-
-			// Oscillate layer2 opacity between 0.0 and 1.0
-			layer2Blend := world.GetBlendMode(layer2)
-			// elapsed := float32(time.Since(startTime).Seconds())
-			// layer2Blend.Opacity = (float32(math.Sin(float64(elapsed*8.0))) + 1.0) / 2.0
-			layer2Blend.Opacity = 1.0 // Fixed opacity (oscillation removed)
 
 			// Wait for previous frame
 			device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
@@ -2978,8 +3241,576 @@ func main() {
 			cmd.Reset(0)
 			cmd.Begin(&vk.CommandBufferBeginInfo{})
 
+			// === ACTION-BASED REPLAY: Clear and redraw all strokes ===
+			if replayRequested {
+				fmt.Printf("Replaying canvas: %d actions\n", actionRecorder.GetIndex())
+
+				// Reset canvas pointers to initial state before replay
+				paintCanvas = paintCanvasA
+				paintCanvasSource = paintCanvasB
+				fmt.Printf("Reset: paintCanvas = A (%v), paintCanvasSource = B (%v)\n",
+					paintCanvas.GetImage(), paintCanvasSource.GetImage())
+
+				// Clear both canvases to white using vkCmdClearColorImage
+				// Transition both canvases to TRANSFER_DST for clearing
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{
+						{
+							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvasA.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+						{
+							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvasB.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+					},
+				)
+
+				// Clear both canvases to white
+				whiteColor := vk.ClearColorValue{Float32: [4]float32{1.0, 1.0, 1.0, 1.0}}
+				cmd.CmdClearColorImage(
+					paintCanvasA.GetImage(),
+					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					&whiteColor,
+					[]vk.ImageSubresourceRange{
+						{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					},
+				)
+				cmd.CmdClearColorImage(
+					paintCanvasB.GetImage(),
+					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					&whiteColor,
+					[]vk.ImageSubresourceRange{
+						{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					},
+				)
+
+				// Transition both canvases back to SHADER_READ_ONLY
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{
+						{
+							SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvasA.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+						{
+							SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvasB.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+					},
+				)
+
+				// Update brushDescriptorSet to point to paintCanvasSource at start of replay
+				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					{
+						DstSet:          brushDescriptorSet,
+						DstBinding:      0,
+						DstArrayElement: 0,
+						DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						ImageInfo: []vk.DescriptorImageInfo{
+							{
+								Sampler:     canvasSampler,
+								ImageView:   paintCanvasSource.GetView(),
+								ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							},
+						},
+					},
+				})
+
+				// Replay all actions up to undoIndex
+				history := actionRecorder.GetHistory()
+				fmt.Printf("Starting replay of %d actions\n", len(history))
+				for actionIdx, action := range history {
+					isLastStroke := (actionIdx == len(history)-1)
+
+					switch action.Type {
+					case ActionTypeStroke:
+						// Replay stroke action
+						if action.Stroke == nil || len(action.Stroke.States) == 0 {
+							continue
+						}
+						stroke := action.Stroke
+						fmt.Printf("  Replaying stroke %d/%d: %d stamps\n", actionIdx+1, len(history), len(stroke.States))
+
+						// Step 1: Collect ALL stamps for the entire stroke
+						var stamps []struct {
+							x, y, pressure float32
+						}
+
+						for stateIdx := 0; stateIdx < len(stroke.States); stateIdx++ {
+							state := stroke.States[stateIdx]
+
+							if stateIdx == 0 {
+								// First state: just render a single stamp at this position
+								stamps = append(stamps, struct{ x, y, pressure float32 }{
+									x:        state.X,
+									y:        state.Y,
+									pressure: state.Pressure,
+								})
+							} else {
+								// Interpolate between previous and current state
+								prevState := stroke.States[stateIdx-1]
+
+								dx := state.X - prevState.X
+								dy := state.Y - prevState.Y
+								distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+
+								brushSpacing := stroke.Radius * 0.05
+								steps := int(distance/brushSpacing) + 1
+								if steps < 1 {
+									steps = 1
+								}
+
+								for i := 0; i <= steps; i++ {
+									t := float32(i) / float32(steps)
+									stamps = append(stamps, struct{ x, y, pressure float32 }{
+										x:        prevState.X + dx*t,
+										y:        prevState.Y + dy*t,
+										pressure: prevState.Pressure + (state.Pressure-prevState.Pressure)*t,
+									})
+								}
+							}
+						}
+
+						// Step 2: Setup rendering ONCE for the entire stroke
+						// Transition canvases for rendering
+						cmd.PipelineBarrier(
+							vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+							vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+							0,
+							[]vk.ImageMemoryBarrier{
+								// Source canvas: ensure SHADER_READ_ONLY
+								{
+									SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									SrcQueueFamilyIndex: ^uint32(0),
+									DstQueueFamilyIndex: ^uint32(0),
+									Image:               paintCanvasSource.GetImage(),
+									SubresourceRange: vk.ImageSubresourceRange{
+										AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+										BaseMipLevel:   0,
+										LevelCount:     1,
+										BaseArrayLayer: 0,
+										LayerCount:     1,
+									},
+								},
+								// Destination canvas: transition to COLOR_ATTACHMENT
+								{
+									SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+									OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									SrcQueueFamilyIndex: ^uint32(0),
+									DstQueueFamilyIndex: ^uint32(0),
+									Image:               paintCanvas.GetImage(),
+									SubresourceRange: vk.ImageSubresourceRange{
+										AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+										BaseMipLevel:   0,
+										LevelCount:     1,
+										BaseArrayLayer: 0,
+										LayerCount:     1,
+									},
+								},
+							},
+						)
+
+						// Begin rendering
+						cmd.BeginRendering(&vk.RenderingInfo{
+							RenderArea: vk.Rect2D{
+								Offset: vk.Offset2D{X: 0, Y: 0},
+								Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+							},
+							LayerCount: 1,
+							ColorAttachments: []vk.RenderingAttachmentInfo{
+								{
+									ImageView:   paintCanvas.GetView(),
+									ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									LoadOp:      vk.ATTACHMENT_LOAD_OP_LOAD,
+									StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
+								},
+							},
+						})
+
+						// Bind pipeline and resources (ONCE)
+						cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipeline)
+						cmd.BindDescriptorSets(
+							vk.PIPELINE_BIND_POINT_GRAPHICS,
+							brushPipelineLayout,
+							0,
+							[]vk.DescriptorSet{brushDescriptorSet},
+							nil,
+						)
+						cmd.SetViewport(0, []vk.Viewport{
+							{
+								X:        0,
+								Y:        0,
+								Width:    float32(paintCanvas.GetWidth()),
+								Height:   float32(paintCanvas.GetHeight()),
+								MinDepth: 0.0,
+								MaxDepth: 1.0,
+							},
+						})
+						cmd.SetScissor(0, []vk.Rect2D{
+							{
+								Offset: vk.Offset2D{X: 0, Y: 0},
+								Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+							},
+						})
+						cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
+
+						// Step 3: Draw all stamps (only push constants + draw in loop!)
+						type BrushPushConstants struct {
+							CanvasWidth  float32
+							CanvasHeight float32
+							BrushX       float32
+							BrushY       float32
+							BrushSize    float32
+							BrushOpacity float32
+							_            float32
+							_            float32
+							ColorR       float32
+							ColorG       float32
+							ColorB       float32
+							ColorA       float32
+						}
+
+						for stampIdx, stamp := range stamps {
+							// Apply minimum pressure threshold for visibility
+							pressure := stamp.pressure
+							/*if pressure < 0.1 {
+								pressure = 1.0
+							}*/
+
+							pushConstants := BrushPushConstants{
+								CanvasWidth:  float32(paintCanvas.GetWidth()),
+								CanvasHeight: float32(paintCanvas.GetHeight()),
+								BrushX:       stamp.x,
+								BrushY:       stamp.y,
+								BrushSize:    stroke.Radius * pressure,
+								BrushOpacity: 1.0,
+								ColorR:       stroke.Color[0],
+								ColorG:       stroke.Color[1],
+								ColorB:       stroke.Color[2],
+								ColorA:       stroke.Color[3],
+							}
+
+							// Debug first stamp of first stroke
+							if actionIdx == 0 && stampIdx == 0 {
+								fmt.Printf("    First stamp: pos=(%.1f, %.1f) radius=%.1f pressure=%.3f size=%.1f color=(%.1f,%.1f,%.1f,%.1f) canvas=%dx%d\n",
+									pushConstants.BrushX, pushConstants.BrushY, stroke.Radius, stamp.pressure, pushConstants.BrushSize,
+									pushConstants.ColorR, pushConstants.ColorG, pushConstants.ColorB, pushConstants.ColorA,
+									int(pushConstants.CanvasWidth), int(pushConstants.CanvasHeight))
+							}
+
+							cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
+							cmd.Draw(6, 1, 0, 0)
+
+							// Swap canvases after each stamp (shader needs to read accumulated result)
+							if stampIdx < len(stamps)-1 {
+								// End current rendering
+								cmd.EndRendering()
+
+								// Transition back
+								cmd.PipelineBarrier(
+									vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+									vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+									0,
+									[]vk.ImageMemoryBarrier{
+										{
+											SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+											DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+											OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+											NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+											SrcQueueFamilyIndex: ^uint32(0),
+											DstQueueFamilyIndex: ^uint32(0),
+											Image:               paintCanvas.GetImage(),
+											SubresourceRange: vk.ImageSubresourceRange{
+												AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+												BaseMipLevel:   0,
+												LevelCount:     1,
+												BaseArrayLayer: 0,
+												LayerCount:     1,
+											},
+										},
+									},
+								)
+
+								// Swap
+								paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
+
+								// Update descriptor
+								device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+									{
+										DstSet:          brushDescriptorSet,
+										DstBinding:      0,
+										DstArrayElement: 0,
+										DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+										ImageInfo: []vk.DescriptorImageInfo{
+											{
+												Sampler:     canvasSampler,
+												ImageView:   paintCanvasSource.GetView(),
+												ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+											},
+										},
+									},
+								})
+
+								// Transition for next stamp
+								cmd.PipelineBarrier(
+									vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+									vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+									0,
+									[]vk.ImageMemoryBarrier{
+										{
+											SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+											DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+											OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+											NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+											SrcQueueFamilyIndex: ^uint32(0),
+											DstQueueFamilyIndex: ^uint32(0),
+											Image:               paintCanvas.GetImage(),
+											SubresourceRange: vk.ImageSubresourceRange{
+												AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+												BaseMipLevel:   0,
+												LevelCount:     1,
+												BaseArrayLayer: 0,
+												LayerCount:     1,
+											},
+										},
+									},
+								)
+
+								// Begin rendering for next stamp
+								cmd.BeginRendering(&vk.RenderingInfo{
+									RenderArea: vk.Rect2D{
+										Offset: vk.Offset2D{X: 0, Y: 0},
+										Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+									},
+									LayerCount: 1,
+									ColorAttachments: []vk.RenderingAttachmentInfo{
+										{
+											ImageView:   paintCanvas.GetView(),
+											ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+											LoadOp:      vk.ATTACHMENT_LOAD_OP_LOAD,
+											StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
+										},
+									},
+								})
+
+								// Rebind everything
+								cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipeline)
+								cmd.BindDescriptorSets(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipelineLayout, 0, []vk.DescriptorSet{brushDescriptorSet}, nil)
+								cmd.SetViewport(0, []vk.Viewport{{X: 0, Y: 0, Width: float32(paintCanvas.GetWidth()), Height: float32(paintCanvas.GetHeight()), MinDepth: 0.0, MaxDepth: 1.0}})
+								cmd.SetScissor(0, []vk.Rect2D{{Offset: vk.Offset2D{X: 0, Y: 0}, Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()}}})
+								cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
+							}
+						}
+
+						// Step 4: Teardown rendering ONCE (for last stamp)
+						// End rendering
+						cmd.EndRendering()
+
+						// Transition destination canvas back to SHADER_READ
+						cmd.PipelineBarrier(
+							vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+							vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+							0,
+							[]vk.ImageMemoryBarrier{
+								{
+									SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+									DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									SrcQueueFamilyIndex: ^uint32(0),
+									DstQueueFamilyIndex: ^uint32(0),
+									Image:               paintCanvas.GetImage(),
+									SubresourceRange: vk.ImageSubresourceRange{
+										AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+										BaseMipLevel:   0,
+										LevelCount:     1,
+										BaseArrayLayer: 0,
+										LayerCount:     1,
+									},
+								},
+							},
+						)
+
+						// Ping-pong swap (only if not the last stroke!)
+						// Don't swap on the last stroke so paintCanvas points to the final result
+						if !isLastStroke {
+							fmt.Printf("    Swapping canvases for next stroke\n")
+							paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
+
+							// Update descriptor set for next stroke
+							device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+								{
+									DstSet:          brushDescriptorSet,
+									DstBinding:      0,
+									DstArrayElement: 0,
+									DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+									ImageInfo: []vk.DescriptorImageInfo{
+										{
+											Sampler:     canvasSampler,
+											ImageView:   paintCanvasSource.GetView(),
+											ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+										},
+									},
+								},
+							})
+						} else {
+							fmt.Printf("    Skipping swap (last stroke) - paintCanvas points to result\n")
+						}
+
+					case ActionTypeLayerVisibility:
+						// Replay layer visibility change
+						if action.LayerVisibility != nil {
+							if blend := world.GetBlendMode(action.LayerVisibility.EntityID); blend != nil {
+								blend.Visible = action.LayerVisibility.NewVisible
+								fmt.Printf("Replay: Set layer %d visibility to %v\n",
+									action.LayerVisibility.EntityID, blend.Visible)
+							}
+						}
+
+					case ActionTypeLayerOpacity:
+						// Replay layer opacity change
+						if action.LayerOpacity != nil {
+							if blend := world.GetBlendMode(action.LayerOpacity.EntityID); blend != nil {
+								blend.Opacity = action.LayerOpacity.NewOpacity
+								fmt.Printf("Replay: Set layer %d opacity to %.2f\n",
+									action.LayerOpacity.EntityID, blend.Opacity)
+							}
+						}
+
+					case ActionTypeLayerTransform:
+						// Replay layer transform change
+						if action.LayerTransform != nil {
+							if transform := world.GetTransform(action.LayerTransform.EntityID); transform != nil {
+								*transform = action.LayerTransform.NewTransform
+								fmt.Printf("Replay: Set layer %d transform\n", action.LayerTransform.EntityID)
+							}
+						}
+
+					case ActionTypeLayerCreate:
+						// TODO: Implement layer creation replay
+						fmt.Println("Replay: LayerCreate not yet implemented")
+
+					case ActionTypeLayerDelete:
+						// TODO: Implement layer deletion replay
+						fmt.Println("Replay: LayerDelete not yet implemented")
+					}
+				}
+
+				replayRequested = false
+				fmt.Printf("Replay complete: rendered %d actions\n", actionRecorder.GetIndex())
+
+				// Update layer2's texture to point to the current paintCanvas after replay
+				fmt.Printf("Updating layer2 texture to point to paintCanvas (result canvas)\n")
+				layer2Texture := world.GetTextureData(layer2)
+				if layer2Texture != nil {
+					fmt.Printf("  Old image: %v, New image: %v\n", layer2Texture.Image, paintCanvas.GetImage())
+					layer2Texture.Image = paintCanvas.GetImage()
+					layer2Texture.ImageView = paintCanvas.GetView()
+
+					// Update the bindless descriptor set
+					binding := layer2Texture.TextureIndex / texturesPerBinding
+					arrayElement := layer2Texture.TextureIndex % texturesPerBinding
+					device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+						{
+							DstSet:          globalBindlessDescriptorSet,
+							DstBinding:      binding,
+							DstArrayElement: arrayElement,
+							DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+							ImageInfo: []vk.DescriptorImageInfo{
+								{
+									Sampler:     canvasSampler,
+									ImageView:   paintCanvas.GetView(),
+									ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								},
+							},
+						},
+					})
+				}
+			}
+
+			// === Stroke start: Detect pen down transition ===
+			if penDown && !prevPenDown && penPressure > 0.0 {
+				// Stroke just started
+				strokeActive = true
+				isFirstFrameOfStroke = true // Skip interpolation on first frame
+				strokeFrameCount = 0        // Reset frame counter
+
+				fmt.Printf("=== Stroke started (action-based undo) ===\n")
+			}
+
 			// === PASS 0: Render brush strokes to canvas (if pen is down) ===
-			if penDown && penPressure > 0.01 {
+			if penDown && penPressure > 0.0 {
 				// Get layer2's transform to account for canvas position/scale
 				layer2Transform := world.GetTransform(layer2)
 
@@ -3000,12 +3831,41 @@ func main() {
 				canvasX := (localClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
 				canvasY := (localClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
 
-				// Transition canvas: SHADER_READ → COLOR_ATTACHMENT
+				// === Record pen state for action-based undo ===
+				if !math.IsNaN(float64(canvasX)) && !math.IsNaN(float64(canvasY)) {
+					currentStroke = append(currentStroke, PenState{
+						X:        canvasX,
+						Y:        canvasY,
+						Pressure: penPressure,
+					})
+				}
+
+				// PING-PONG BUFFERS: Transition source (read) and destination (write) canvases
+				// Source canvas: SHADER_READ_ONLY (for sampling in shader)
+				// Destination canvas: COLOR_ATTACHMENT (for writing)
 				cmd.PipelineBarrier(
 					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 					0,
 					[]vk.ImageMemoryBarrier{
+						// Source canvas: ensure it's in SHADER_READ_ONLY layout
+						{
+							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               paintCanvasSource.GetImage(),
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   0,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						},
+						// Destination canvas: transition to COLOR_ATTACHMENT
 						{
 							SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
 							DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -3045,6 +3905,15 @@ func main() {
 				// Bind brush pipeline
 				cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipeline)
 
+				// Bind descriptor set with source canvas texture for sampling
+				cmd.BindDescriptorSets(
+					vk.PIPELINE_BIND_POINT_GRAPHICS,
+					brushPipelineLayout,
+					0, // First set
+					[]vk.DescriptorSet{brushDescriptorSet},
+					nil, // No dynamic offsets
+				)
+
 				// Set viewport and scissor
 				cmd.SetViewport(0, []vk.Viewport{
 					{
@@ -3082,40 +3951,53 @@ func main() {
 				// Bind brush vertex buffer (once, before loop)
 				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
 
-				// Interpolate brush stamps between previous and current positions
-				// Apply same clip-space transformation to previous position
-				// Initialize previous position on first stroke to avoid interpolating from (0,0)
-				if prevPenX == 0.0 && prevPenY == 0.0 {
-					prevPenX = penX
-					prevPenY = penY
-					prevPenPressure = penPressure
-				}
+				// Brush radius and spacing settings
+				brushSpacing := brushRadius * 0.05 // Very tight spacing for smooth strokes
 
-				prevClipX := (prevPenX/float32(swapExtent.Width))*2.0 - 1.0
-				prevClipY := (prevPenY/float32(swapExtent.Height))*2.0 - 1.0
+				var steps int
+				var prevCanvasX, prevCanvasY float32
 
-				// Apply inverse camera transform to previous position
-				prevWorldClipX := prevClipX/cameraZoom + cameraX
-				prevWorldClipY := prevClipY/cameraZoom + cameraY
-				prevLocalClipX := (prevWorldClipX - l2tx) / layer2Transform.ScaleX
-				prevLocalClipY := (prevWorldClipY - l2ty) / layer2Transform.ScaleX
-				prevCanvasX := (prevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
-				prevCanvasY := (prevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
+				dx := float32(0.0)
+				dy := float32(0.0)
+				dp := float32(0.0)
 
-				// Calculate distance between previous and current positions
-				dx := canvasX - prevCanvasX
-				dy := canvasY - prevCanvasY
-				dp := penPressure - prevPenPressure
-				distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+				// On first frame of stroke, skip interpolation to avoid (0,0) jolt
+				if isFirstFrameOfStroke {
+					// Draw single stamp at current position
+					steps = 0
+					prevCanvasX = canvasX
+					prevCanvasY = canvasY
+					isFirstFrameOfStroke = false // Clear flag for next frame
+				} else {
+					// Interpolate brush stamps between previous and current positions
+					// Initialize previous position on first stroke to avoid interpolating from (0,0)
+					if prevPenX == 0.0 && prevPenY == 0.0 {
+						prevPenX = penX
+						prevPenY = penY
+						prevPenPressure = penPressure
+					}
 
-				// Brush spacing (smaller = more stamps, smoother stroke)
-				brushRadius := float32(10.0)
-				brushSpacing := brushRadius * 0.1
+					prevClipX := (prevPenX/float32(swapExtent.Width))*2.0 - 1.0
+					prevClipY := (prevPenY/float32(swapExtent.Height))*2.0 - 1.0
 
-				// Calculate number of steps
-				steps := int(distance/brushSpacing) + 1
-				if steps < 1 {
-					steps = 1
+					// Apply inverse camera transform to previous position
+					prevWorldClipX := prevClipX/cameraZoom + cameraX
+					prevWorldClipY := prevClipY/cameraZoom + cameraY
+					prevLocalClipX := (prevWorldClipX - l2tx) / layer2Transform.ScaleX
+					prevLocalClipY := (prevWorldClipY - l2ty) / layer2Transform.ScaleX
+					prevCanvasX = (prevLocalClipX + 1.0) / 2.0 * float32(paintCanvas.GetWidth())
+					prevCanvasY = (prevLocalClipY + 1.0) / 2.0 * float32(paintCanvas.GetHeight())
+
+					// Calculate distance between previous and current positions
+					dx := canvasX - prevCanvasX
+					dy := canvasY - prevCanvasY
+					distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+
+					// Calculate number of steps
+					steps = int(distance/brushSpacing) + 1
+					if steps < 1 {
+						steps = 1
+					}
 				}
 				// Calculate prevPrev canvas positions for Bezier control points
 				prevPrevClipX := (prevPrevPenX/float32(swapExtent.Width))*2.0 - 1.0
@@ -3135,16 +4017,30 @@ func main() {
 				controlP := prevPenPressure
 
 				if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
-					controlX = prevCanvasX + (prevCanvasX-prevPrevCanvasX)*0.25
-					controlY = prevCanvasY + (prevCanvasY-prevPrevCanvasY)*0.25
-					controlP = prevPenPressure + (prevPenPressure-prevPrevPenPressure)*0.25
+					// Dampen Bezier influence for first few frames to avoid bulges
+					bezierFactor := float32(0.25)
+					if strokeFrameCount < 4 {
+						// Turn off completely for the first few frames
+						bezierFactor = 0.00
+					}
+
+					controlX = prevCanvasX + (prevCanvasX-prevPrevCanvasX)*bezierFactor
+					controlY = prevCanvasY + (prevCanvasY-prevPrevCanvasY)*bezierFactor
+					controlP = prevPenPressure + (prevPenPressure-prevPrevPenPressure)*bezierFactor
+				}
+
+				// Increment frame counter while drawing
+				if strokeActive {
+					strokeFrameCount++
 				}
 
 				// Render brush stamps along interpolated path
+				// IMPORTANT: Each stamp needs its own render pass with ping-pong swap
+				// to properly accumulate with previous stamps in the stroke
 				for i := 0; i <= steps; i++ {
 					t := float32(i) / float32(steps)
 
-					var interpX, interpY, interpP float32
+					var interpX, interpY, interpP float32 = 0.0, 0.0, 0.0
 					if useBezierInterpolation && (prevPrevPenX != 0.0 || prevPrevPenY != 0.0) {
 						// Quadratic Bezier interpolation
 						interpX = evaluateQuadraticBezier(prevCanvasX, controlX, canvasX, t)
@@ -3152,9 +4048,15 @@ func main() {
 						interpP = evaluateQuadraticBezier(prevPenPressure, controlP, penPressure, t)
 					} else {
 						// Linear interpolation (fallback)
-						interpX = prevCanvasX + dx*t
-						interpY = prevCanvasY + dy*t
-						interpP = prevPenPressure + dp*t
+						if !math.IsNaN(float64(prevCanvasX + dx*t)) {
+							interpX = prevCanvasX + dx*t
+						}
+						if !math.IsNaN(float64(prevCanvasY + dy*t)) {
+							interpY = prevCanvasY + dy*t
+						}
+						if !math.IsNaN(float64(prevPenPressure + dp*t)) {
+							interpP = prevPenPressure + dp*t
+						}
 					}
 
 					pushConstants := BrushPushConstants{
@@ -3172,34 +4074,147 @@ func main() {
 
 					cmd.CmdPushConstants(brushPipelineLayout, vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT, 0, 48, unsafe.Pointer(&pushConstants))
 					cmd.Draw(6, 1, 0, 0)
-				}
 
-				cmd.EndRendering()
+					// After each stamp: End rendering, transition, swap, update descriptor
+					cmd.EndRendering()
 
-				// Transition canvas: COLOR_ATTACHMENT → SHADER_READ
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{
-						{
-							SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-							DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-							OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-							NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-							SrcQueueFamilyIndex: ^uint32(0),
-							DstQueueFamilyIndex: ^uint32(0),
-							Image:               paintCanvas.GetImage(),
-							SubresourceRange: vk.ImageSubresourceRange{
-								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-								BaseMipLevel:   0,
-								LevelCount:     1,
-								BaseArrayLayer: 0,
-								LayerCount:     1,
+					// Transition destination canvas: COLOR_ATTACHMENT → SHADER_READ
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+						vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{
+							{
+								SrcAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+								DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+								OldLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+								NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								SrcQueueFamilyIndex: ^uint32(0),
+								DstQueueFamilyIndex: ^uint32(0),
+								Image:               paintCanvas.GetImage(),
+								SubresourceRange: vk.ImageSubresourceRange{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									BaseMipLevel:   0,
+									LevelCount:     1,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
 							},
 						},
-					},
-				)
+					)
+
+					// PING-PONG SWAP: Swap after each stamp so next stamp sees accumulated result
+					paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
+
+					// Update descriptor set to bind the new source canvas
+					device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+						{
+							DstSet:          brushDescriptorSet,
+							DstBinding:      0,
+							DstArrayElement: 0,
+							DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+							ImageInfo: []vk.DescriptorImageInfo{
+								{
+									Sampler:     canvasSampler,
+									ImageView:   paintCanvasSource.GetView(),
+									ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								},
+							},
+						},
+					})
+
+					// If not the last stamp, prepare for next stamp
+					if i < steps {
+						// Transition canvases for next stamp
+						cmd.PipelineBarrier(
+							vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+							vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+							0,
+							[]vk.ImageMemoryBarrier{
+								// Source canvas: ensure it's in SHADER_READ_ONLY layout
+								{
+									SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									SrcQueueFamilyIndex: ^uint32(0),
+									DstQueueFamilyIndex: ^uint32(0),
+									Image:               paintCanvasSource.GetImage(),
+									SubresourceRange: vk.ImageSubresourceRange{
+										AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+										BaseMipLevel:   0,
+										LevelCount:     1,
+										BaseArrayLayer: 0,
+										LayerCount:     1,
+									},
+								},
+								// Destination canvas: transition to COLOR_ATTACHMENT
+								{
+									SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+									DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+									OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+									NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									SrcQueueFamilyIndex: ^uint32(0),
+									DstQueueFamilyIndex: ^uint32(0),
+									Image:               paintCanvas.GetImage(),
+									SubresourceRange: vk.ImageSubresourceRange{
+										AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+										BaseMipLevel:   0,
+										LevelCount:     1,
+										BaseArrayLayer: 0,
+										LayerCount:     1,
+									},
+								},
+							},
+						)
+
+						// Begin rendering for next stamp
+						cmd.BeginRendering(&vk.RenderingInfo{
+							RenderArea: vk.Rect2D{
+								Offset: vk.Offset2D{X: 0, Y: 0},
+								Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+							},
+							LayerCount: 1,
+							ColorAttachments: []vk.RenderingAttachmentInfo{
+								{
+									ImageView:   paintCanvas.GetView(),
+									ImageLayout: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+									LoadOp:      vk.ATTACHMENT_LOAD_OP_LOAD,
+									StoreOp:     vk.ATTACHMENT_STORE_OP_STORE,
+								},
+							},
+						})
+
+						// Rebind pipeline and descriptor set for next stamp
+						cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, brushPipeline)
+						cmd.BindDescriptorSets(
+							vk.PIPELINE_BIND_POINT_GRAPHICS,
+							brushPipelineLayout,
+							0,
+							[]vk.DescriptorSet{brushDescriptorSet},
+							nil,
+						)
+						cmd.SetViewport(0, []vk.Viewport{
+							{
+								X:        0,
+								Y:        0,
+								Width:    float32(paintCanvas.GetWidth()),
+								Height:   float32(paintCanvas.GetHeight()),
+								MinDepth: 0.0,
+								MaxDepth: 1.0,
+							},
+						})
+						cmd.SetScissor(0, []vk.Rect2D{
+							{
+								Offset: vk.Offset2D{X: 0, Y: 0},
+								Extent: vk.Extent2D{Width: paintCanvas.GetWidth(), Height: paintCanvas.GetHeight()},
+							},
+						})
+						cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
+					}
+				}
+				// Loop handles all rendering, transitions, and swaps
+
 				// Update previous position for next frame
 				prevPrevPenX = prevPenX
 				prevPrevPenY = prevPenY
@@ -3208,6 +4223,50 @@ func main() {
 				prevPenY = penY
 				prevPenPressure = penPressure
 			} else {
+				// === Stroke end: Detect pen up transition ===
+				if prevPenDown && !penDown && strokeActive {
+					// Save completed stroke to action history
+					if len(currentStroke) > 0 {
+						// Add new stroke to action history
+						newStroke := Stroke{
+							States: currentStroke,
+							Color:  [4]float32{1.0, 0.0, 0.0, 1.0}, // Red
+							Radius: brushRadius,
+						}
+						actionRecorder.RecordStroke(newStroke)
+
+						// Update layer2's texture to point to the current paintCanvas
+						layer2Texture := world.GetTextureData(layer2)
+						if layer2Texture != nil {
+							layer2Texture.Image = paintCanvas.GetImage()
+							layer2Texture.ImageView = paintCanvas.GetView()
+
+							// Update the bindless descriptor set
+							binding := layer2Texture.TextureIndex / texturesPerBinding
+							arrayElement := layer2Texture.TextureIndex % texturesPerBinding
+							device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+								{
+									DstSet:          globalBindlessDescriptorSet,
+									DstBinding:      binding,
+									DstArrayElement: arrayElement,
+									DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+									ImageInfo: []vk.DescriptorImageInfo{
+										{
+											Sampler:     canvasSampler,
+											ImageView:   paintCanvas.GetView(),
+											ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+										},
+									},
+								},
+							})
+						}
+
+						// Reset current stroke for next drawing
+						currentStroke = nil
+					}
+					strokeActive = false
+				}
+
 				// Reset previous position when pen is up to prevent interpolation between strokes
 				prevPenX = 0.0
 				prevPenY = 0.0
@@ -3216,6 +4275,9 @@ func main() {
 				prevPrevPenY = 0.0
 				prevPrevPenPressure = 0.0
 			}
+
+			// Update prevPenDown for next frame
+			prevPenDown = penDown
 
 			// ===  PASS 1: Render each layer to its framebuffer ===
 			for _, entity := range sortedLayers {
@@ -3285,6 +4347,10 @@ func main() {
 
 				if entity == uiButtonBaseLayer {
 					// Render button base rectangles only (no text)
+					//buttonCount := len(world.QueryUIButtons())
+					if frameCounter%60 == 0 { // Log every 60 frames to avoid spam
+						//fmt.Printf("[UI] Rendering %d button bases (undoValid=%v)\n", buttonCount, undoValid)
+					}
 					systems.RenderUIButtonBases(world, uiCtx)
 				} else if entity == uiButtonTextLayer {
 					// Render button text labels only (no rectangles)
@@ -3405,6 +4471,10 @@ func main() {
 				blendMode := world.GetBlendMode(entity)
 				transform := world.GetTransform(entity)
 				if textureData != nil && blendMode != nil && transform != nil {
+					// Check if entity is in screen space (ignores camera transforms)
+					screenSpace := world.GetScreenSpace(entity)
+					isScreenSpace := screenSpace != nil && screenSpace.Enabled
+
 					systems.CompositeLayer(
 						compositeCtx,
 						textureData.TextureIndex,
@@ -3415,107 +4485,50 @@ func main() {
 						cameraX,
 						cameraY,
 						cameraZoom,
+						isScreenSpace,
 					)
 				}
 			}
 
-			// === Render Text Overlay ===
-			// NOTE: Old direct text rendering disabled - now using button labels with staging buffers
-			// Query all text entities
-			/*
-				textEntities := world.QueryAll(func(e ecs.Entity) bool {
-					return world.HasText(e) && world.GetText(e).Visible
-				})
-
-				for _, entity := range textEntities {
-					textComp := world.GetText(entity)
-
-					// Generate text quads
-					vertices, indices := systems.GenerateTextQuads(textComp, sdfAtlas)
-					if len(vertices) == 0 {
-						continue
-					}
-
-					// Upload vertices
-					vertexData := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), len(vertices)*16)
-					err = device.UploadToBuffer(textVertexMemory, vertexData)
-					if err != nil {
-						panic(fmt.Sprintf("Text vertex upload failed: %v", err))
-					}
-
-					// Upload indices
-					indexData := unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), len(indices)*2)
-					err = device.UploadToBuffer(textIndexMemory, indexData)
-					if err != nil {
-						panic(fmt.Sprintf("Text index upload failed: %v", err))
-					}
-
-					// Bind text pipeline
-					cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, textPipeline)
-
-					// Bind descriptor set (SDF atlas)
-					cmd.BindDescriptorSets(
-						vk.PIPELINE_BIND_POINT_GRAPHICS,
-						textPipelineLayout,
-						0,
-						[]vk.DescriptorSet{textDescriptorSet},
-						nil,
-					)
-
-					// Set viewport and scissor
-					cmd.SetViewport(0, []vk.Viewport{
-						{
-							X:        0,
-							Y:        0,
-							Width:    float32(swapExtent.Width),
-							Height:   float32(swapExtent.Height),
-							MinDepth: 0.0,
-							MaxDepth: 1.0,
-						},
-					})
-					cmd.SetScissor(0, []vk.Rect2D{
-						{
-							Offset: vk.Offset2D{X: 0, Y: 0},
-							Extent: swapExtent,
-						},
-					})
-
-					// Push constants (screen size and text color)
-					// NOTE: Must match std140 layout - vec4 aligned to 16 bytes
-					type TextPushConstants struct {
-						ScreenWidth  float32
-						ScreenHeight float32
-						_padding1    float32 // Padding for vec4 alignment
-						_padding2    float32 // Padding for vec4 alignment
-						ColorR       float32
-						ColorG       float32
-						ColorB       float32
-						ColorA       float32
-					}
-					pushData := TextPushConstants{
-						ScreenWidth:  float32(swapExtent.Width),
-						ScreenHeight: float32(swapExtent.Height),
-						ColorR:       textComp.Color[0],
-						ColorG:       textComp.Color[1],
-						ColorB:       textComp.Color[2],
-						ColorA:       textComp.Color[3],
-					}
-					cmd.CmdPushConstants(
-						textPipelineLayout,
-						vk.SHADER_STAGE_VERTEX_BIT,
-						0,
-						32, // 32 bytes: vec2 (8) + padding (8) + vec4 (16)
-						unsafe.Pointer(&pushData),
-					)
-
-					// Bind vertex and index buffers
-					cmd.BindVertexBuffers(0, []vk.Buffer{textVertexBuffer}, []uint64{0})
-					cmd.BindIndexBuffer(textIndexBuffer, 0, vk.INDEX_TYPE_UINT16)
-
-					// Draw text
-					cmd.DrawIndexed(uint32(len(indices)), 1, 0, 0, 0)
+			// Update undo/redo button enabled states (action-based)
+			if undoBtn := world.GetUIButton(undoButton); undoBtn != nil {
+				undoBtn.Enabled = actionRecorder.CanUndo() // Can undo if we have history
+				// Dim the button when disabled
+				if !undoBtn.Enabled {
+					undoBtn.ColorNormal = [4]float32{0.15, 0.15, 0.15, 0.5}  // Very dark, semi-transparent
+					undoBtn.ColorHovered = [4]float32{0.15, 0.15, 0.15, 0.5} // Same as normal when disabled
+					undoBtn.LabelColor = [4]float32{0.5, 0.5, 0.5, 0.5}      // Dim text
+					undoBtn.LabelHovered = [4]float32{0.5, 0.5, 0.5, 0.5}
+				} else {
+					undoBtn.ColorNormal = [4]float32{0.2, 0.2, 0.2, 0.9}
+					undoBtn.ColorHovered = [4]float32{0.3, 0.3, 0.3, 0.9}
+					undoBtn.LabelColor = [4]float32{1.0, 1.0, 1.0, 1.0}
+					undoBtn.LabelHovered = [4]float32{1.0, 1.0, 1.0, 1.0}
 				}
-			*/
+				world.AddUIButton(undoButton, undoBtn)
+			}
+			if redoBtn := world.GetUIButton(redoButton); redoBtn != nil {
+				redoBtn.Enabled = actionRecorder.CanRedo() // Can redo if we haven't reached the end
+				// Dim the button when disabled
+				if !redoBtn.Enabled {
+					redoBtn.ColorNormal = [4]float32{0.15, 0.15, 0.15, 0.5}  // Very dark, semi-transparent
+					redoBtn.ColorHovered = [4]float32{0.15, 0.15, 0.15, 0.5} // Same as normal when disabled
+					redoBtn.LabelColor = [4]float32{0.5, 0.5, 0.5, 0.5}      // Dim text
+					redoBtn.LabelHovered = [4]float32{0.5, 0.5, 0.5, 0.5}
+				} else {
+					redoBtn.ColorNormal = [4]float32{0.2, 0.2, 0.2, 0.9}
+					redoBtn.ColorHovered = [4]float32{0.3, 0.3, 0.3, 0.9}
+					redoBtn.LabelColor = [4]float32{1.0, 1.0, 1.0, 1.0}
+					redoBtn.LabelHovered = [4]float32{1.0, 1.0, 1.0, 1.0}
+				}
+				world.AddUIButton(redoButton, redoBtn)
+			}
+
+			if frameCounter%60 == 0 { // Log every 60 frames
+				//fmt.Printf("[UI] Updating buttons: mouse=(%.1f,%.1f), down=%v, buttons=%d\n",
+				//	mouseX, mouseY, mouseButtonDown, len(world.QueryUIButtons()))
+			}
+			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
 
 			cmd.EndRendering()
 
@@ -3568,7 +4581,7 @@ func main() {
 
 			imageIndexLast = imageIndex
 
-			sdl.Delay(1)
+			//sdl.Delay(1)
 		}
 
 		// Wait for device to finish

@@ -465,6 +465,72 @@ func (cmd CommandBuffer) CopyBufferToImage(srcBuffer Buffer, dstImage Image, dst
 		C.uint32_t(len(cRegions)), &cRegions[0])
 }
 
+func (cmd CommandBuffer) CopyImageToBuffer(srcImage Image, srcImageLayout ImageLayout, dstBuffer Buffer, regions []BufferImageCopy) {
+	cRegions := make([]C.VkBufferImageCopy, len(regions))
+	for i, region := range regions {
+		cRegions[i].bufferOffset = C.VkDeviceSize(region.BufferOffset)
+		cRegions[i].bufferRowLength = C.uint32_t(region.BufferRowLength)
+		cRegions[i].bufferImageHeight = C.uint32_t(region.BufferImageHeight)
+		cRegions[i].imageSubresource.aspectMask = C.VkImageAspectFlags(region.ImageSubresource.AspectMask)
+		cRegions[i].imageSubresource.mipLevel = C.uint32_t(region.ImageSubresource.MipLevel)
+		cRegions[i].imageSubresource.baseArrayLayer = C.uint32_t(region.ImageSubresource.BaseArrayLayer)
+		cRegions[i].imageSubresource.layerCount = C.uint32_t(region.ImageSubresource.LayerCount)
+		cRegions[i].imageOffset.x = C.int32_t(region.ImageOffset.X)
+		cRegions[i].imageOffset.y = C.int32_t(region.ImageOffset.Y)
+		cRegions[i].imageOffset.z = C.int32_t(region.ImageOffset.Z)
+		cRegions[i].imageExtent.width = C.uint32_t(region.ImageExtent.Width)
+		cRegions[i].imageExtent.height = C.uint32_t(region.ImageExtent.Height)
+		cRegions[i].imageExtent.depth = C.uint32_t(region.ImageExtent.Depth)
+	}
+
+	C.vkCmdCopyImageToBuffer(cmd.handle, srcImage.handle,
+		C.VkImageLayout(srcImageLayout),
+		dstBuffer.handle,
+		C.uint32_t(len(cRegions)), &cRegions[0])
+}
+
+// ImageCopy specifies an image to image copy region
+type ImageCopy struct {
+	SrcSubresource ImageSubresourceLayers
+	SrcOffset      Offset3D
+	DstSubresource ImageSubresourceLayers
+	DstOffset      Offset3D
+	Extent         Extent3D
+}
+
+// CmdCopyImage copies data between images (GPU to GPU)
+func (cmd CommandBuffer) CmdCopyImage(
+	srcImage Image, srcImageLayout ImageLayout,
+	dstImage Image, dstImageLayout ImageLayout,
+	regions []ImageCopy) {
+
+	cRegions := make([]C.VkImageCopy, len(regions))
+	for i, region := range regions {
+		cRegions[i].srcSubresource.aspectMask = C.VkImageAspectFlags(region.SrcSubresource.AspectMask)
+		cRegions[i].srcSubresource.mipLevel = C.uint32_t(region.SrcSubresource.MipLevel)
+		cRegions[i].srcSubresource.baseArrayLayer = C.uint32_t(region.SrcSubresource.BaseArrayLayer)
+		cRegions[i].srcSubresource.layerCount = C.uint32_t(region.SrcSubresource.LayerCount)
+		cRegions[i].srcOffset.x = C.int32_t(region.SrcOffset.X)
+		cRegions[i].srcOffset.y = C.int32_t(region.SrcOffset.Y)
+		cRegions[i].srcOffset.z = C.int32_t(region.SrcOffset.Z)
+		cRegions[i].dstSubresource.aspectMask = C.VkImageAspectFlags(region.DstSubresource.AspectMask)
+		cRegions[i].dstSubresource.mipLevel = C.uint32_t(region.DstSubresource.MipLevel)
+		cRegions[i].dstSubresource.baseArrayLayer = C.uint32_t(region.DstSubresource.BaseArrayLayer)
+		cRegions[i].dstSubresource.layerCount = C.uint32_t(region.DstSubresource.LayerCount)
+		cRegions[i].dstOffset.x = C.int32_t(region.DstOffset.X)
+		cRegions[i].dstOffset.y = C.int32_t(region.DstOffset.Y)
+		cRegions[i].dstOffset.z = C.int32_t(region.DstOffset.Z)
+		cRegions[i].extent.width = C.uint32_t(region.Extent.Width)
+		cRegions[i].extent.height = C.uint32_t(region.Extent.Height)
+		cRegions[i].extent.depth = C.uint32_t(region.Extent.Depth)
+	}
+
+	C.vkCmdCopyImage(cmd.handle,
+		srcImage.handle, C.VkImageLayout(srcImageLayout),
+		dstImage.handle, C.VkImageLayout(dstImageLayout),
+		C.uint32_t(len(cRegions)), &cRegions[0])
+}
+
 // Descriptor Set Binding
 func (cmd CommandBuffer) BindDescriptorSets(
 	pipelineBindPoint PipelineBindPoint,

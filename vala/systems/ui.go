@@ -2,9 +2,10 @@ package systems
 
 import (
 	"unsafe"
+
 	vk "github.com/NOT-REAL-GAMES/vulkango"
-	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/canvas"
+	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/font"
 )
 
@@ -28,29 +29,40 @@ type UIRenderContext struct {
 func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown bool, cameraX, cameraY, cameraZoom float32, swapWidth, swapHeight uint32) {
 	buttons := world.QueryUIButtons()
 
-	// Apply inverse camera transform to mouse position
-	// Convert mouse pixels to clip space (-1 to 1)
-	mouseClipX := (mouseX/float32(swapWidth))*2.0 - 1.0
-	mouseClipY := (mouseY/float32(swapHeight))*2.0 - 1.0
-
-	// Apply inverse camera transform: pos = pos / zoom + offset
-	// (This undoes the camera transform applied during composite rendering)
-	worldClipX := mouseClipX/cameraZoom + cameraX
-	worldClipY := mouseClipY/cameraZoom + cameraY
-
-	// Convert back to pixel coordinates for comparison with button bounds
-	worldPixelX := ((worldClipX + 1.0) / 2.0) * float32(swapWidth)
-	worldPixelY := ((worldClipY + 1.0) / 2.0) * float32(swapHeight)
-
 	for _, entity := range buttons {
 		button := world.GetUIButton(entity)
 		if !button.Enabled {
 			continue
 		}
 
-		// Check if transformed mouse is hovering over button
-		isHovering := worldPixelX >= button.X && worldPixelX <= button.X+button.Width &&
-			worldPixelY >= button.Y && worldPixelY <= button.Y+button.Height
+		// Check if button is in screen space (doesn't move with camera)
+		screenSpace := world.GetScreenSpace(entity)
+		isScreenSpace := screenSpace != nil && screenSpace.Enabled
+
+		var testX, testY float32
+		if isScreenSpace {
+			// Screen-space button: use direct mouse coordinates
+			testX = mouseX
+			testY = mouseY
+		} else {
+			// World-space button: apply inverse camera transform to mouse position
+			// Convert mouse pixels to clip space (-1 to 1)
+			mouseClipX := (mouseX/float32(swapWidth))*2.0 - 1.0
+			mouseClipY := (mouseY/float32(swapHeight))*2.0 - 1.0
+
+			// Apply inverse camera transform: pos = pos / zoom + offset
+			// (This undoes the camera transform applied during composite rendering)
+			worldClipX := mouseClipX/cameraZoom + cameraX
+			worldClipY := mouseClipY/cameraZoom + cameraY
+
+			// Convert back to pixel coordinates for comparison with button bounds
+			testX = ((worldClipX + 1.0) / 2.0) * float32(swapWidth)
+			testY = ((worldClipY + 1.0) / 2.0) * float32(swapHeight)
+		}
+
+		// Check if mouse is hovering over button
+		isHovering := testX >= button.X && testX <= button.X+button.Width &&
+			testY >= button.Y && testY <= button.Y+button.Height
 
 		// Update button state based on hover and mouse button
 		if isHovering {
@@ -115,13 +127,17 @@ func RenderUIButtonBases(world *ecs.World, ctx *UIRenderContext) {
 	// Bind vertex buffer
 	ctx.CommandBuffer.BindVertexBuffers(0, []vk.Buffer{ctx.BrushVertexBuffer}, []uint64{0})
 
+	renderedCount := 0
 	for _, entity := range buttons {
 		button := world.GetUIButton(entity)
 
 		// Skip disabled buttons
 		if !button.Enabled {
+			//fmt.Printf("[UI DEBUG] Skipping disabled button: Entity=%d, Label='%s'\n", entity, button.Label)
 			continue
 		}
+
+		renderedCount++
 
 		// Select color based on button state
 		var color [4]float32
@@ -169,6 +185,11 @@ func RenderUIButtonBases(world *ecs.World, ctx *UIRenderContext) {
 
 		// Draw 6 vertices (2 triangles = 1 quad)
 		ctx.CommandBuffer.Draw(6, 1, 0, 0)
+	}
+
+	// Debug: Show how many buttons were actually rendered vs queried
+	if renderedCount != len(buttons) {
+		//fmt.Printf("[UI DEBUG] Rendered %d/%d buttons (some were disabled)\n", renderedCount, len(buttons))
 	}
 }
 
