@@ -25,8 +25,8 @@
      inkscape:document-units="mm"
      showgrid="false"
      inkscape:zoom="2.9007652"
-     inkscape:cx="152.20122"
-     inkscape:cy="73.084164"
+     inkscape:cx="117.72756"
+     inkscape:cy="86.873629"
      inkscape:window-width="1887"
      inkscape:window-height="1048"
      inkscape:window-maximized="0"
@@ -198,7 +198,7 @@
          offset="0"
          id="stop106" />
       <stop
-         style="stop-color:hsl(76, 13.374, 57.94);stop-opacity:1;"
+         style="stop-color:hsl(76, 13.374, 59.986);stop-opacity:0.50475608;"
          offset="1"
          id="stop107" />
     </linearGradient>
@@ -303,7 +303,7 @@
          sodipodi:nodetypes="cccccccccccc" />
       <path
          style="fill:url(#linearGradient146);fill-rule:evenodd;stroke:none;stroke-width:1.00147;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
-         d="m 533.30099,478.00491 19.10323,-60.35807 -2.96995,120.53735 -11.14465,-12.76817 7.45865,-70.88057 -15.85523,61.41656 z"
+         d="m 523.74499,509.26372 28.65923,-91.61688 -2.96995,120.53735 -11.14465,-12.76817 7.45865,-70.88057 -15.85523,61.41656 z"
          id="path3"
          sodipodi:nodetypes="ccccccc" />
       <path
