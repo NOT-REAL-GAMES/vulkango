@@ -4190,7 +4190,7 @@ void main() {
 				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
 
 				// Brush radius and spacing settings
-				brushSpacing := brushRadius * penPressure * 0.5 // Very tight spacing for smooth strokes
+				brushSpacing := brushRadius * prevPenPressure * 0.5 // Very tight spacing for smooth strokes
 
 				var steps int
 				var prevCanvasX, prevCanvasY float32
