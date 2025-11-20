@@ -60,7 +60,7 @@
          offset="0"
          id="stop26" />
       <stop
-         style="stop-color:hsl(335, 53.239, 71.065);stop-opacity:1;"
+         style="stop-color:hsl(282, 100, 76.667);stop-opacity:1;"
          offset="1"
          id="stop27" />
     </linearGradient>
@@ -198,7 +198,7 @@
          offset="0"
          id="stop106" />
       <stop
-         style="stop-color:hsl(76, 13.374, 59.986);stop-opacity:0.50475608;"
+         style="stop-color:hsl(103, 28.031, 67.393);stop-opacity:0;"
          offset="1"
          id="stop107" />
     </linearGradient>
@@ -208,8 +208,8 @@
        id="linearGradient107"
        x1="491.57977"
        y1="459.25018"
-       x2="660.44711"
-       y2="459.25018"
+       x2="728.77405"
+       y2="490.65151"
        gradientUnits="userSpaceOnUse" />
     <linearGradient
        id="gradient145"
