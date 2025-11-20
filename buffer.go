@@ -107,7 +107,10 @@ func (device Device) AllocateMemory(allocInfo *MemoryAllocateInfo) (DeviceMemory
 }
 
 func (device Device) FreeMemory(memory DeviceMemory) {
-	C.vkFreeMemory(device.handle, memory.handle, nil)
+	if memory.handle != nil && device.handle != nil {
+		C.vkFreeMemory(device.handle, memory.handle, nil)
+
+	}
 }
 
 func (device Device) BindBufferMemory(buffer Buffer, memory DeviceMemory, offset uint64) error {

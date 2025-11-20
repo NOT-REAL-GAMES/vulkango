@@ -7,7 +7,7 @@ import (
 // PageSize is the size of each virtual memory page in pixels
 // Common choices: 128x128, 256x256, or 512x512
 // Smaller = more granular memory control, Larger = less overhead
-const PageSize = 256
+const PageSize = 64
 
 // Canvas represents a virtual texture that can be backed by either
 // dense allocation (all memory allocated upfront) or sparse binding
@@ -48,6 +48,11 @@ type Canvas interface {
 	// MarkDirty marks a region as modified (for potential optimizations)
 	// x, y, width, height are in pixels
 	MarkDirty(x, y, width, height uint32)
+
+	// AllocateAll pre-allocates all sparse pages for the entire canvas
+	// For dense canvases, this is a no-op (already allocated)
+	// For sparse canvases, this allocates all virtual pages
+	AllocateAll() error
 
 	// Upload uploads pixel data to a region
 	// data should be in the canvas's pixel format
@@ -130,16 +135,17 @@ func GetPagesInRect(x, y, width, height uint32) []PageCoord {
 // This is the recommended way to create canvases.
 //
 // Example:
-//   canvas, err := canvas.New(canvas.Config{
-//       Device: device,
-//       Width: 8192,
-//       Height: 8192,
-//       Format: vk.FORMAT_R8G8B8A8_UNORM,
-//       Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
-//              vk.IMAGE_USAGE_SAMPLED_BIT |
-//              vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-//       UseSparseBinding: false, // Use dense for now
-//   }, commandPool, queue)
+//
+//	canvas, err := canvas.New(canvas.Config{
+//	    Device: device,
+//	    Width: 8192,
+//	    Height: 8192,
+//	    Format: vk.FORMAT_R8G8B8A8_UNORM,
+//	    Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
+//	           vk.IMAGE_USAGE_SAMPLED_BIT |
+//	           vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+//	    UseSparseBinding: false, // Use dense for now
+//	}, commandPool, queue)
 func New(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (Canvas, error) {
 	if cfg.UseSparseBinding {
 		return NewSparseCanvas(cfg, commandPool, queue)

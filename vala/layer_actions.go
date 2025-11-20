@@ -80,9 +80,10 @@ type LayerTransformAction struct {
 
 // LayerVisibilityAction stores visibility changes
 type LayerVisibilityAction struct {
-	EntityID   ecs.Entity
-	OldVisible bool
-	NewVisible bool
+	EntityID     ecs.Entity
+	OldVisible   bool
+	NewVisible   bool
+	SavedOpacity float32 // The opacity to restore when showing the layer
 }
 
 // LayerOpacityAction stores opacity changes
@@ -148,7 +149,7 @@ func (r *ActionRecorder) RecordStroke(stroke Stroke) {
 }
 
 // RecordLayerVisibility adds a visibility change action to the history
-func (r *ActionRecorder) RecordLayerVisibility(entityID ecs.Entity, oldVisible, newVisible bool) {
+func (r *ActionRecorder) RecordLayerVisibility(entityID ecs.Entity, oldVisible, newVisible bool, savedOpacity float32) {
 	// Truncate history if we're in the middle of the stack
 	if r.index < len(r.history) {
 		r.history = r.history[:r.index]
@@ -157,14 +158,15 @@ func (r *ActionRecorder) RecordLayerVisibility(entityID ecs.Entity, oldVisible, 
 	action := Action{
 		Type: ActionTypeLayerVisibility,
 		LayerVisibility: &LayerVisibilityAction{
-			EntityID:   entityID,
-			OldVisible: oldVisible,
-			NewVisible: newVisible,
+			EntityID:     entityID,
+			OldVisible:   oldVisible,
+			NewVisible:   newVisible,
+			SavedOpacity: savedOpacity,
 		},
 	}
 	r.history = append(r.history, action)
 	r.index = len(r.history)
-	fmt.Printf("Recorded layer visibility change: layer=%d, %v→%v\n", entityID, oldVisible, newVisible)
+	fmt.Printf("Recorded layer visibility change: layer=%d, %v→%v, savedOpacity=%.2f\n", entityID, oldVisible, newVisible, savedOpacity)
 }
 
 // RecordLayerOpacity adds an opacity change action to the history

@@ -110,6 +110,11 @@ func (c *DenseCanvas) MarkDirty(x, y, width, height uint32) {
 	})
 }
 
+// AllocateAll is a no-op for dense canvases (already fully allocated)
+func (c *DenseCanvas) AllocateAll() error {
+	return nil
+}
+
 // Upload uploads pixel data to a region using a staging buffer
 func (c *DenseCanvas) Upload(x, y, width, height uint32, data []byte) error {
 	// Calculate expected data size based on format

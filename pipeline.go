@@ -401,3 +401,45 @@ func (data *pipelineLayoutCreateData) free() {
 		C.free(unsafe.Pointer(data.cInfo))
 	}
 }
+
+// CreateComputePipeline creates a compute pipeline
+func (device Device) CreateComputePipeline(createInfo *ComputePipelineCreateInfo) (Pipeline, error) {
+	cInfo := (*C.VkComputePipelineCreateInfo)(C.calloc(1, C.sizeof_VkComputePipelineCreateInfo))
+	defer C.free(unsafe.Pointer(cInfo))
+
+	cInfo.sType = C.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO
+	cInfo.pNext = nil
+	cInfo.flags = 0
+
+	// Shader stage
+	cInfo.stage.sType = C.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+	cInfo.stage.pNext = nil
+	cInfo.stage.flags = 0
+	cInfo.stage.stage = C.VkShaderStageFlagBits(createInfo.Stage.Stage)
+	cInfo.stage.module = createInfo.Stage.Module.handle
+
+	// Shader entry point name
+	cName := C.CString(createInfo.Stage.Name)
+	defer C.free(unsafe.Pointer(cName))
+	cInfo.stage.pName = cName
+	cInfo.stage.pSpecializationInfo = nil
+
+	// Pipeline layout
+	cInfo.layout = createInfo.Layout.handle
+	cInfo.basePipelineHandle = nil
+	cInfo.basePipelineIndex = -1
+
+	var pipeline C.VkPipeline
+	result := C.vkCreateComputePipelines(device.handle, nil, 1, cInfo, nil, &pipeline)
+
+	if result != C.VK_SUCCESS {
+		return Pipeline{}, Result(result)
+	}
+
+	return Pipeline{handle: pipeline}, nil
+}
+
+// DestroyComputePipeline destroys a compute pipeline
+func (device Device) DestroyComputePipeline(pipeline Pipeline) {
+	C.vkDestroyPipeline(device.handle, pipeline.handle, nil)
+}

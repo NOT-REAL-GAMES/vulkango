@@ -1819,3 +1819,9 @@ type PhysicalDeviceLimits struct {
 type PhysicalDeviceProperties struct {
 	Limits PhysicalDeviceLimits
 }
+
+// Compute pipeline structures
+type ComputePipelineCreateInfo struct {
+	Stage  PipelineShaderStageCreateInfo
+	Layout PipelineLayout
+}

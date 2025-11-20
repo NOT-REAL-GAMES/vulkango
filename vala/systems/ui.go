@@ -26,7 +26,7 @@ type UIRenderContext struct {
 // mouseButtonDown: true if left mouse button is currently pressed
 // cameraX, cameraY, cameraZoom: camera transform parameters
 // swapWidth, swapHeight: window dimensions for coordinate conversion
-func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown bool, cameraX, cameraY, cameraZoom float32, swapWidth, swapHeight uint32) {
+func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown bool, buttonJustPressed bool, cameraX, cameraY, cameraZoom float32, swapWidth, swapHeight uint32) {
 	buttons := world.QueryUIButtons()
 
 	for _, entity := range buttons {
@@ -67,8 +67,11 @@ func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown b
 		// Update button state based on hover and mouse button
 		if isHovering {
 			if mouseButtonDown {
+				// Only set WasPressed if button was just pressed this frame while hovering
+				if buttonJustPressed {
+					button.WasPressed = true
+				}
 				button.State = ecs.UIButtonPressed
-				button.WasPressed = true
 			} else {
 				// Mouse released while hovering - trigger onClick!
 				if button.WasPressed && button.OnClick != nil {

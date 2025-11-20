@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unsafe"
 
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
@@ -1696,7 +1697,8 @@ func main() {
 			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
 				vk.IMAGE_USAGE_SAMPLED_BIT |
 				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-				vk.IMAGE_USAGE_TRANSFER_SRC_BIT, // Add TRANSFER_SRC for Download
+				vk.IMAGE_USAGE_TRANSFER_SRC_BIT | // Add TRANSFER_SRC for Download
+				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true, // SPARSE BINDING ENABLED! RTX 2000+ only
 		}, commandPool, queue)
 		if err != nil {
@@ -1714,7 +1716,8 @@ func main() {
 			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
 				vk.IMAGE_USAGE_SAMPLED_BIT |
 				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-				vk.IMAGE_USAGE_TRANSFER_SRC_BIT,
+				vk.IMAGE_USAGE_TRANSFER_SRC_BIT |
+				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true,
 		}, commandPool, queue)
 		if err != nil {
@@ -1724,23 +1727,225 @@ func main() {
 
 		fmt.Printf("Paint canvases created: %dx%d (ping-pong buffers)\n", paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
 
-		// Clear both canvases to white
-		whitePixels := make([]byte, 8192*8192*4)
-		for i := 0; i < len(whitePixels); i += 4 {
-			whitePixels[i] = 255   // R
-			whitePixels[i+1] = 255 // G
-			whitePixels[i+2] = 255 // B
-			whitePixels[i+3] = 255 // A
-		}
-		err = paintCanvasA.Upload(0, 0, 8192, 8192, whitePixels)
+		// Pre-allocate all sparse pages
+		fmt.Printf("%d: Starting canvas initialization...\n", time.Now().UnixMilli())
+		err = paintCanvasA.AllocateAll()
 		if err != nil {
-			panic(fmt.Sprintf("Failed to clear canvas A: %v", err))
+			panic(fmt.Sprintf("Failed to allocate canvas A pages: %v", err))
 		}
-		err = paintCanvasB.Upload(0, 0, 8192, 8192, whitePixels)
+		err = paintCanvasB.AllocateAll()
 		if err != nil {
-			panic(fmt.Sprintf("Failed to clear canvas B: %v", err))
+			panic(fmt.Sprintf("Failed to allocate canvas B pages: %v", err))
 		}
-		fmt.Println("Both canvases cleared to white")
+
+		// Use compute shader for fast canvas clear (much faster!)
+		clearCompSource := `#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0, rgba8) uniform writeonly image2D outputImage;
+layout(push_constant) uniform PushConstants {
+    vec4 clearColor;
+    uvec2 imageSize;
+} pc;
+void main() {
+    uvec2 pixelCoord = gl_GlobalInvocationID.xy;
+    if (pixelCoord.x >= pc.imageSize.x || pixelCoord.y >= pc.imageSize.y) return;
+    imageStore(outputImage, ivec2(pixelCoord), pc.clearColor);
+}`
+
+		clearCompResult, err := compiler.CompileIntoSPV(clearCompSource, "clear.comp", shaderc.ComputeShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to compile clear compute shader: %v", err))
+		}
+		defer clearCompResult.Release()
+
+		clearCompModule, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{
+			Code: clearCompResult.GetBytes(),
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create clear compute shader module: %v", err))
+		}
+		defer device.DestroyShaderModule(clearCompModule)
+
+		// Create descriptor set layout for compute shader (single storage image)
+		clearDescLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Bindings: []vk.DescriptorSetLayoutBinding{
+				{
+					Binding:         0,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_STORAGE_IMAGE,
+					DescriptorCount: 1,
+					StageFlags:      vk.SHADER_STAGE_COMPUTE_BIT,
+				},
+			},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create clear descriptor layout: %v", err))
+		}
+		defer device.DestroyDescriptorSetLayout(clearDescLayout)
+
+		// Create compute pipeline layout with push constants
+		clearPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			SetLayouts: []vk.DescriptorSetLayout{clearDescLayout},
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_COMPUTE_BIT,
+					Offset:     0,
+					Size:       24, // vec4(16) + uvec2(8) = 24 bytes
+				},
+			},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create clear pipeline layout: %v", err))
+		}
+		defer device.DestroyPipelineLayout(clearPipelineLayout)
+
+		// Create compute pipeline
+		clearPipeline, err := device.CreateComputePipeline(&vk.ComputePipelineCreateInfo{
+			Stage: vk.PipelineShaderStageCreateInfo{
+				Stage:  vk.SHADER_STAGE_COMPUTE_BIT,
+				Module: clearCompModule,
+				Name:   "main",
+			},
+			Layout: clearPipelineLayout,
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create clear compute pipeline: %v", err))
+		}
+		defer device.DestroyComputePipeline(clearPipeline)
+
+		// Create descriptor pool for clear operation
+		clearDescPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			MaxSets: 2, // One for each canvas
+			PoolSizes: []vk.DescriptorPoolSize{
+				{Type: vk.DESCRIPTOR_TYPE_STORAGE_IMAGE, DescriptorCount: 2},
+			},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create clear descriptor pool: %v", err))
+		}
+		defer device.DestroyDescriptorPool(clearDescPool)
+
+		// Clear both canvases using compute shader
+		fmt.Printf("%d: Clearing canvases with compute shader...\n", time.Now().UnixMilli())
+
+		for _, cvs := range []canvas.Canvas{paintCanvasA, paintCanvasB} {
+			// Allocate descriptor set
+			descSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
+				DescriptorPool: clearDescPool,
+				SetLayouts:     []vk.DescriptorSetLayout{clearDescLayout},
+			})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to allocate clear descriptor set: %v", err))
+			}
+			descSet := descSets[0]
+
+			// Update descriptor set to bind canvas image
+			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				{
+					DstSet:         descSet,
+					DstBinding:     0,
+					DescriptorType: vk.DESCRIPTOR_TYPE_STORAGE_IMAGE,
+					ImageInfo: []vk.DescriptorImageInfo{{
+						ImageView:   cvs.GetView(),
+						ImageLayout: vk.IMAGE_LAYOUT_GENERAL,
+					}},
+				},
+			})
+
+			// Create command buffer
+			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+				CommandPool:        commandPool,
+				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+				CommandBufferCount: 1,
+			})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to allocate clear command buffer: %v", err))
+			}
+			cmd := cmdBufs[0]
+
+			cmd.Begin(&vk.CommandBufferBeginInfo{
+				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			})
+
+			// Transition to GENERAL layout for compute
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{
+					{
+						SrcAccessMask:       0,
+						DstAccessMask:       vk.ACCESS_SHADER_WRITE_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+						NewLayout:           vk.IMAGE_LAYOUT_GENERAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               cvs.GetImage(),
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					},
+				},
+			)
+
+			// Bind compute pipeline and descriptor set
+			cmd.BindPipeline(vk.PIPELINE_BIND_POINT_COMPUTE, clearPipeline)
+			cmd.BindDescriptorSets(vk.PIPELINE_BIND_POINT_COMPUTE, clearPipelineLayout, 0, []vk.DescriptorSet{descSet}, nil)
+
+			// Push constants (white color + image size)
+			pushData := []byte{
+				0x00, 0x00, 0x80, 0x3F, // clearColor.r = 1.0 (float32 little-endian)
+				0x00, 0x00, 0x80, 0x3F, // clearColor.g = 1.0
+				0x00, 0x00, 0x80, 0x3F, // clearColor.b = 1.0
+				0x00, 0x00, 0x80, 0x3F, // clearColor.a = 1.0
+				0x00, 0x20, 0x00, 0x00, // imageSize.x = 8192 (uint32 little-endian)
+				0x00, 0x20, 0x00, 0x00, // imageSize.y = 8192 (uint32 little-endian)
+			}
+			cmd.PushConstants(clearPipelineLayout, vk.SHADER_STAGE_COMPUTE_BIT, 0, pushData)
+
+			// Dispatch compute shader (8192/16 = 512 work groups per dimension)
+			cmd.Dispatch(512, 512, 1)
+
+			// Transition to SHADER_READ_ONLY for fragment shader access
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{
+					{
+						SrcAccessMask:       vk.ACCESS_SHADER_WRITE_BIT,
+						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_GENERAL,
+						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               cvs.GetImage(),
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					},
+				},
+			)
+
+			cmd.End()
+
+			// Submit and wait
+			queue.Submit([]vk.SubmitInfo{
+				{CommandBuffers: []vk.CommandBuffer{cmd}},
+			}, vk.Fence{})
+			queue.WaitIdle()
+
+			device.FreeCommandBuffers(commandPool, cmdBufs)
+		}
+
+		fmt.Printf("%d: Both canvases cleared with compute shader!\n", time.Now().UnixMilli())
 
 		// Note: No GPU undo buffer needed - using action-based undo with stroke replay
 
@@ -1748,15 +1953,17 @@ func main() {
 		paintCanvas := paintCanvasA       // Start with A as current (destination)
 		paintCanvasSource := paintCanvasB // B is source for first frame
 
-		// Create sampler for paint canvas
+		// Create sampler for paint canvas with anisotropic filtering for smoother zoom
 		canvasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
-			MagFilter:    vk.FILTER_LINEAR,
-			MinFilter:    vk.FILTER_LINEAR,
-			MipmapMode:   vk.SAMPLER_MIPMAP_MODE_LINEAR,
-			AddressModeU: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			AddressModeV: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			AddressModeW: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			MaxLod:       1.0,
+			MagFilter:        vk.FILTER_LINEAR,
+			MinFilter:        vk.FILTER_LINEAR,
+			MipmapMode:       vk.SAMPLER_MIPMAP_MODE_LINEAR,
+			AddressModeU:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeV:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeW:     vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			MaxLod:           1.0,
+			AnisotropyEnable: true,
+			MaxAnisotropy:    16.0, // High quality filtering for zoomed views
 		})
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create canvas sampler: %v", err))
@@ -2695,7 +2902,17 @@ func main() {
 				oldVisible := blendMode.Visible
 				newVisible := !oldVisible
 				blendMode.Visible = newVisible
-				actionRecorder.RecordLayerVisibility(layer2, oldVisible, newVisible)
+				// Save/restore opacity to preserve user's opacity setting
+				if newVisible {
+					// Showing: restore saved opacity
+					blendMode.Opacity = blendMode.SavedOpacity
+				} else {
+					// Hiding: save current opacity, then set to 0
+					blendMode.SavedOpacity = blendMode.Opacity
+					blendMode.Opacity = 0.0
+				}
+				// Record the action with the SavedOpacity value for undo/redo
+				actionRecorder.RecordLayerVisibility(layer2, oldVisible, newVisible, blendMode.SavedOpacity)
 			}
 		})
 		buttonComponent.Label = "Toggle Layer"
@@ -2756,7 +2973,7 @@ func main() {
 		screenSpace := ecs.NewScreenSpace()
 		screenSpace.Enabled = true
 
-		//world.AddScreenSpace(testButton, screenSpace)
+		world.AddScreenSpace(testButton, screenSpace)
 
 		// === UI Layer Z-Index Constants ===
 		// Reserve top 16 Z-indices for UI layers (0x7ffff0 to 0x7fffff)
@@ -2984,6 +3201,8 @@ func main() {
 		// Pen state tracking
 		penX := float32(0.0)
 		penY := float32(0.0)
+		truePenX := float32(0.0)
+		truePenY := float32(0.0)
 		prevPenX := float32(0.0)
 		prevPenY := float32(0.0)
 		prevPrevPenX := float32(0.0) // For Bezier control point calculation
@@ -3009,6 +3228,7 @@ func main() {
 		mouseX := float32(0.0)
 		mouseY := float32(0.0)
 		mouseButtonDown := false
+		mouseButtonDownPrev := false
 
 		// Camera state for canvas navigation
 		cameraX := float32(0.0)
@@ -3047,8 +3267,13 @@ func main() {
 					}
 				case sdl.EVENT_PEN_MOTION:
 					motion := event.PenMotion
-					penX = motion.X
-					penY = motion.Y
+
+					truePenX = motion.X
+					truePenY = motion.Y
+
+					penX = penX + ((motion.X - penX) * max(0.1, min((cameraZoom/10), 1.0)))
+					penY = penY + ((motion.Y - penY) * max(0.1, min((cameraZoom/10), 1.0)))
+
 					penDown = motion.IsDown()
 
 				case sdl.EVENT_MOUSE_MOTION:
@@ -3215,7 +3440,7 @@ func main() {
 			// Update pen data text
 			textComp := world.GetText(helloText)
 			textComp.Content = fmt.Sprintf("Pen: (%.0f, %.0f)  Pressure: %.3f  Down: %v",
-				penX, penY, penPressure, penDown)
+				truePenX, truePenY, penPressure, penDown)
 			world.AddText(helloText, textComp)
 
 			// Update UI button states
@@ -3250,6 +3475,10 @@ func main() {
 				paintCanvasSource = paintCanvasB
 				fmt.Printf("Reset: paintCanvas = A (%v), paintCanvasSource = B (%v)\n",
 					paintCanvas.GetImage(), paintCanvasSource.GetImage())
+
+				// Note: Don't reset layer2 opacity/visibility here!
+				// Only actions in the history should affect these properties.
+				// This preserves user-made changes that aren't being undone.
 
 				// Clear both canvases to white using vkCmdClearColorImage
 				// Transition both canvases to TRANSFER_DST for clearing
@@ -3420,7 +3649,7 @@ func main() {
 								dy := state.Y - prevState.Y
 								distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 
-								brushSpacing := stroke.Radius * 0.05
+								brushSpacing := stroke.Radius * prevState.Pressure * 0.5
 								steps := int(distance/brushSpacing) + 1
 								if steps < 1 {
 									steps = 1
@@ -3733,8 +3962,17 @@ func main() {
 						if action.LayerVisibility != nil {
 							if blend := world.GetBlendMode(action.LayerVisibility.EntityID); blend != nil {
 								blend.Visible = action.LayerVisibility.NewVisible
-								fmt.Printf("Replay: Set layer %d visibility to %v\n",
-									action.LayerVisibility.EntityID, blend.Visible)
+								blend.SavedOpacity = action.LayerVisibility.SavedOpacity
+								// Apply opacity based on visibility
+								if blend.Visible {
+									// Showing: restore saved opacity from action
+									blend.Opacity = blend.SavedOpacity
+								} else {
+									// Hiding: set to 0
+									blend.Opacity = 0.0
+								}
+								fmt.Printf("Replay: Set layer %d visibility to %v (opacity=%.1f, saved=%.1f)\n",
+									action.LayerVisibility.EntityID, blend.Visible, blend.Opacity, blend.SavedOpacity)
 							}
 						}
 
@@ -3952,7 +4190,7 @@ func main() {
 				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
 
 				// Brush radius and spacing settings
-				brushSpacing := brushRadius * 0.05 // Very tight spacing for smooth strokes
+				brushSpacing := brushRadius * penPressure * 0.5 // Very tight spacing for smooth strokes
 
 				var steps int
 				var prevCanvasX, prevCanvasY float32
@@ -4018,7 +4256,7 @@ func main() {
 
 				if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
 					// Dampen Bezier influence for first few frames to avoid bulges
-					bezierFactor := float32(0.25)
+					bezierFactor := float32(0.1)
 					if strokeFrameCount < 4 {
 						// Turn off completely for the first few frames
 						bezierFactor = 0.00
@@ -4276,7 +4514,7 @@ func main() {
 				prevPrevPenPressure = 0.0
 			}
 
-			// Update prevPenDown for next frame
+			// Update prevPenDown for stroke tracking
 			prevPenDown = penDown
 
 			// ===  PASS 1: Render each layer to its framebuffer ===
@@ -4528,7 +4766,17 @@ func main() {
 				//fmt.Printf("[UI] Updating buttons: mouse=(%.1f,%.1f), down=%v, buttons=%d\n",
 				//	mouseX, mouseY, mouseButtonDown, len(world.QueryUIButtons()))
 			}
-			systems.UpdateUIButtons(world, mouseX, mouseY, mouseButtonDown, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
+
+			// Use pen coordinates for UI if pen is active, otherwise use mouse
+			uiX, uiY := mouseX, mouseY
+			if penDown || prevPenDown {
+				uiX, uiY = penX, penY
+			}
+			uiButtonDown := mouseButtonDown || penDown
+			uiButtonDownPrev := mouseButtonDownPrev || prevPenDown
+			uiButtonJustPressed := uiButtonDown && !uiButtonDownPrev
+
+			systems.UpdateUIButtons(world, uiX, uiY, uiButtonDown, uiButtonJustPressed, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
 
 			cmd.EndRendering()
 
@@ -4580,6 +4828,9 @@ func main() {
 			})
 
 			imageIndexLast = imageIndex
+
+			// Update previous button state at end of frame for next frame's "just pressed" detection
+			mouseButtonDownPrev = mouseButtonDown
 
 			//sdl.Delay(1)
 		}

@@ -52,9 +52,10 @@ type VulkanPipeline struct {
 
 // BlendMode component controls how a layer is composited with others.
 type BlendMode struct {
-	Mode    BlendModeType // The blending mode (normal, multiply, add, etc.)
-	Opacity float32       // Layer opacity (0.0 = transparent, 1.0 = opaque)
-	Visible bool          // Whether the layer is visible
+	Mode         BlendModeType // The blending mode (normal, multiply, add, etc.)
+	Opacity      float32       // Layer opacity (0.0 = transparent, 1.0 = opaque)
+	Visible      bool          // Whether the layer is visible
+	SavedOpacity float32       // Saved opacity value when layer is hidden (for restoration)
 }
 
 // BlendModeType defines different compositing modes.
@@ -72,9 +73,10 @@ const (
 // NewBlendMode creates a default BlendMode component.
 func NewBlendMode() *BlendMode {
 	return &BlendMode{
-		Mode:    BlendNormal,
-		Opacity: 1.0,
-		Visible: true,
+		Mode:         BlendNormal,
+		Opacity:      1.0,
+		Visible:      true,
+		SavedOpacity: 1.0,
 	}
 }
 

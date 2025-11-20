@@ -638,3 +638,34 @@ func (cmd CommandBuffer) CmdCopyBuffer(
 		&cRegions[0],
 	)
 }
+
+// PushConstants updates push constant values
+func (cmd CommandBuffer) PushConstants(
+	layout PipelineLayout,
+	stageFlags ShaderStageFlags,
+	offset uint32,
+	values []byte,
+) {
+	if len(values) == 0 {
+		return
+	}
+
+	C.vkCmdPushConstants(
+		cmd.handle,
+		layout.handle,
+		C.VkShaderStageFlags(stageFlags),
+		C.uint32_t(offset),
+		C.uint32_t(len(values)),
+		unsafe.Pointer(&values[0]),
+	)
+}
+
+// Dispatch dispatches compute work
+func (cmd CommandBuffer) Dispatch(groupCountX, groupCountY, groupCountZ uint32) {
+	C.vkCmdDispatch(
+		cmd.handle,
+		C.uint32_t(groupCountX),
+		C.uint32_t(groupCountY),
+		C.uint32_t(groupCountZ),
+	)
+}
