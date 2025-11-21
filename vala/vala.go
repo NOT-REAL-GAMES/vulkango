@@ -1691,8 +1691,8 @@ func main() {
 		paintCanvasA, err := canvas.New(canvas.Config{
 			Device:         device,
 			PhysicalDevice: physicalDevice,
-			Width:          8192,
-			Height:         8192,
+			Width:          2048,
+			Height:         2048,
 			Format:         vk.FORMAT_R8G8B8A8_UNORM,
 			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
 				vk.IMAGE_USAGE_SAMPLED_BIT |
@@ -1710,8 +1710,8 @@ func main() {
 		paintCanvasB, err := canvas.New(canvas.Config{
 			Device:         device,
 			PhysicalDevice: physicalDevice,
-			Width:          8192,
-			Height:         8192,
+			Width:          2048,
+			Height:         2048,
 			Format:         vk.FORMAT_R8G8B8A8_UNORM,
 			Usage: vk.IMAGE_USAGE_TRANSFER_DST_BIT |
 				vk.IMAGE_USAGE_SAMPLED_BIT |
@@ -1901,13 +1901,13 @@ void main() {
 				0x00, 0x00, 0x80, 0x3F, // clearColor.g = 1.0
 				0x00, 0x00, 0x80, 0x3F, // clearColor.b = 1.0
 				0x00, 0x00, 0x80, 0x3F, // clearColor.a = 1.0
-				0x00, 0x20, 0x00, 0x00, // imageSize.x = 8192 (uint32 little-endian)
-				0x00, 0x20, 0x00, 0x00, // imageSize.y = 8192 (uint32 little-endian)
+				0x00, 0x0f, 0x00, 0x00, // imageSize.x = 2048 (uint32 little-endian)
+				0x00, 0x0f, 0x00, 0x00, // imageSize.y = 2048 (uint32 little-endian)
 			}
 			cmd.PushConstants(clearPipelineLayout, vk.SHADER_STAGE_COMPUTE_BIT, 0, pushData)
 
-			// Dispatch compute shader (8192/16 = 512 work groups per dimension)
-			cmd.Dispatch(512, 512, 1)
+			// Dispatch compute shader (2048/16 = 512 work groups per dimension)
+			cmd.Dispatch(128, 128, 1)
 
 			// Transition to SHADER_READ_ONLY for fragment shader access
 			cmd.PipelineBarrier(
@@ -2988,7 +2988,7 @@ void main() {
 		world.AddScreenSpace(testButton, screenSpace)
 
 		// === UI Layer Z-Index Constants ===
-		// Reserve top 16 Z-indices for UI layers (0x7ffff0 to 0x7fffff)
+		// Reserve top 256 Z-indices for UI layers (0x7fff00 to 0x7fffff)
 		const (
 			UILayerButtonBase = 0x7ffffe // Button base rectangles (below text)
 			UILayerButtonText = 0x7fffff // Button text labels (on top)
