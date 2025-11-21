@@ -4877,7 +4877,7 @@ void main() {
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
 			if frameCounter%60 == 0 { // Log every 60 frames
-				fmt.Printf("FPS: %d | milliseconds per 60 frames: %d\n", 16667/(time.Now().UnixMilli()-timer), time.Now().UnixMilli()-timer)
+				fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
 				timer = time.Now().UnixMilli()
 			}
 
