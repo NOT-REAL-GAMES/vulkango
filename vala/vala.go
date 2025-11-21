@@ -3252,6 +3252,7 @@ void main() {
 
 		currentLayer := -4999999
 		currentFrame := 0
+		currentFrameLast := 0
 
 		//imageIndexLast := uint32(0)
 		frameCounter := uint64(0) // For periodic debug logging
@@ -3455,6 +3456,7 @@ void main() {
 		}()
 
 		for running {
+			currentFrameLast = currentFrame
 			frameCounter++
 
 			l2tx := world.GetTransform(layer2).X
@@ -3675,7 +3677,7 @@ void main() {
 								dy := state.Y - prevState.Y
 								distance := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 
-								brushSpacing := stroke.Radius * prevState.Pressure * 0.5
+								brushSpacing := stroke.Radius * prevState.Pressure * 0.1
 								steps := int(distance/brushSpacing) + 1
 								if steps < 1 {
 									steps = 1
@@ -4216,7 +4218,7 @@ void main() {
 				cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
 
 				// Brush radius and spacing settings
-				brushSpacing := brushRadius * prevPenPressure * 0.5 // Very tight spacing for smooth strokes
+				brushSpacing := brushRadius * prevPenPressure * 0.1 // Very tight spacing for smooth strokes
 
 				var steps int
 				var prevCanvasX, prevCanvasY float32
@@ -4282,7 +4284,7 @@ void main() {
 
 				if prevPrevPenX != 0.0 || prevPrevPenY != 0.0 {
 					// Dampen Bezier influence for first few frames to avoid bulges
-					bezierFactor := float32(0.1)
+					bezierFactor := float32(0.33)
 					if strokeFrameCount < 4 {
 						// Turn off completely for the first few frames
 						bezierFactor = 0.00
@@ -4868,7 +4870,7 @@ void main() {
 		}
 
 		// Wait for device to finish
-		//device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
+		device.WaitForFences([]vk.Fence{inFlightFences[currentFrameLast]}, true, ^uint64(0))
 
 	}
 }
