@@ -3252,7 +3252,7 @@ void main() {
 
 		currentLayer := -4999999
 		currentFrame := 0
-		currentFrameLast := 0
+		//currentFrameLast := 0
 
 		//imageIndexLast := uint32(0)
 		frameCounter := uint64(0) // For periodic debug logging
@@ -3267,6 +3267,7 @@ void main() {
 
 					case sdl.EVENT_QUIT:
 						running = false
+						sdl.Quit()
 
 					case sdl.EVENT_PEN_AXIS:
 						axis := event.PenAxis
@@ -3456,7 +3457,7 @@ void main() {
 		}()
 
 		for running {
-			currentFrameLast = currentFrame
+			//currentFrameLast = currentFrame
 			frameCounter++
 
 			l2tx := world.GetTransform(layer2).X
@@ -4876,7 +4877,7 @@ void main() {
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
 			if frameCounter%60 == 0 { // Log every 60 frames
-				fmt.Printf("FPS: %d | milliseconds per 60 frames: %d\n", 100000.0/(time.Now().UnixMilli()-timer), time.Now().UnixMilli()-timer)
+				fmt.Printf("FPS: %d | milliseconds per 60 frames: %d\n", 16667/(time.Now().UnixMilli()-timer), time.Now().UnixMilli()-timer)
 				timer = time.Now().UnixMilli()
 			}
 
@@ -4885,7 +4886,5 @@ void main() {
 		}
 
 		// Wait for device to finish
-		device.WaitForFences([]vk.Fence{inFlightFences[currentFrameLast]}, true, ^uint64(0))
-
 	}
 }
