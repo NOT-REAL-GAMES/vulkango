@@ -302,10 +302,238 @@ void main() {
 }
 `
 
+// HSV to RGB conversion helper
+const hsvHelperFunctions = `
+vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+`
+
+// Hue wheel shader - displays circular gradient of all hues
+const hueWheelVertexShader = `
+#version 450
+
+layout(location = 0) in vec2 inPosition; // 0-1 range
+
+layout(push_constant) uniform PushConstants {
+    vec4 rect; // x, y, width, height in pixels
+} pc;
+
+layout(location = 0) out vec2 fragUV; // 0-1, will be centered to -1 to 1 in frag shader
+
+void main() {
+    // Convert from pixel coordinates to NDC
+    vec2 screenSize = vec2(960.0, 960.0); // TODO: make dynamic
+    vec2 pixelPos = pc.rect.xy + inPosition * pc.rect.zw;
+    vec2 ndc = (pixelPos / screenSize) * 2.0 - 1.0;
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    fragUV = inPosition;
+}
+`
+
+const hueWheelFragmentShader = `
+#version 450
+` + hsvHelperFunctions + `
+
+layout(location = 0) in vec2 fragUV;
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    // Center UV coordinates (-1 to 1)
+    vec2 centered = fragUV * 2.0 - 1.0;
+
+    // Calculate distance from center
+    float dist = length(centered);
+
+    // Only draw in a ring (inner radius 0.6, outer radius 1.0)
+    if (dist < 0.6 || dist > 1.0) {
+        discard;
+    }
+
+    // Calculate angle (hue)
+    float angle = atan(centered.y, centered.x);
+    float hue = (angle + 3.14159265) / (2.0 * 3.14159265); // 0 to 1
+
+    // Convert hue to RGB (full saturation, full value)
+    vec3 color = hsv2rgb(vec3(hue, 1.0, 1.0));
+
+    outColor = vec4(color, 1.0);
+}
+`
+
+// SV box shader - displays saturation/value grid for selected hue
+const svBoxVertexShader = `
+#version 450
+
+layout(location = 0) in vec2 inPosition; // 0-1 range
+
+layout(push_constant) uniform PushConstants {
+    vec4 rect; // x, y, width, height in pixels
+    float hue; // selected hue (0-1)
+} pc;
+
+layout(location = 0) out vec2 fragUV;
+
+void main() {
+    vec2 screenSize = vec2(960.0, 960.0);
+    vec2 pixelPos = pc.rect.xy + inPosition * pc.rect.zw;
+    vec2 ndc = (pixelPos / screenSize) * 2.0 - 1.0;
+
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    fragUV = inPosition;
+}
+`
+
+const svBoxFragmentShader = `
+#version 450
+` + hsvHelperFunctions + `
+
+layout(push_constant) uniform PushConstants {
+    vec4 rect;
+    float hue;
+} pc;
+
+layout(location = 0) in vec2 fragUV;
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    // X axis = saturation (0 = left/saturated, 1 = right/desaturated)
+    // Y axis = value (0 = top/bright, 1 = bottom/dark)
+    float saturation = 1.0 - fragUV.x; // Flip so left is saturated
+    float value = 1.0 - fragUV.y;       // Flip so top is bright
+
+    vec3 color = hsv2rgb(vec3(pc.hue, saturation, value));
+    outColor = vec4(color, 1.0);
+}
+`
+
 type Vertex struct {
 	Pos      [2]float32
 	Color    [3]float32
 	TexCoord [2]float32
+}
+
+// ColorPicker state
+type ColorPicker struct {
+	Hue        float32 // 0.0 to 1.0
+	Saturation float32 // 0.0 to 1.0
+	Value      float32 // 0.0 to 1.0
+	Visible    bool
+}
+
+// HSV to RGB conversion
+func hsv2rgb(h, s, v float32) (r, g, b float32) {
+	if s == 0 {
+		return v, v, v
+	}
+
+	h = h * 6.0
+	i := int(h)
+	f := h - float32(i)
+	p := v * (1.0 - s)
+	q := v * (1.0 - s*f)
+	t := v * (1.0 - s*(1.0-f))
+
+	switch i % 6 {
+	case 0:
+		return v, t, p
+	case 1:
+		return q, v, p
+	case 2:
+		return p, v, t
+	case 3:
+		return p, q, v
+	case 4:
+		return t, p, v
+	default:
+		return v, p, q
+	}
+}
+
+// renderColorPicker renders the HSV color picker to the command buffer
+func renderColorPicker(
+	cmd vk.CommandBuffer,
+	picker *ColorPicker,
+	vertexBuffer vk.Buffer,
+	hueWheelPipeline vk.Pipeline,
+	hueWheelPipelineLayout vk.PipelineLayout,
+	svBoxPipeline vk.Pipeline,
+	svBoxPipelineLayout vk.PipelineLayout,
+	swapExtent vk.Extent2D,
+) {
+	// Set viewport and scissor
+	cmd.SetViewport(0, []vk.Viewport{
+		{
+			X:        0,
+			Y:        0,
+			Width:    float32(swapExtent.Width),
+			Height:   float32(swapExtent.Height),
+			MinDepth: 0.0,
+			MaxDepth: 1.0,
+		},
+	})
+
+	cmd.SetScissor(0, []vk.Rect2D{
+		{
+			Offset: vk.Offset2D{X: 0, Y: 0},
+			Extent: swapExtent,
+		},
+	})
+
+	// Bind vertex buffer
+	cmd.BindVertexBuffers(0, []vk.Buffer{vertexBuffer}, []uint64{0})
+
+	// === Render Hue Wheel ===
+	// Position in bottom-right corner, 200x200 pixels
+	hueWheelX := float32(swapExtent.Width) - 220.0
+	hueWheelY := float32(swapExtent.Height) - 220.0
+	hueWheelSize := float32(200.0)
+
+	cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, hueWheelPipeline)
+
+	// Push constants: vec4 rect (x, y, width, height)
+	hueWheelRect := [4]float32{hueWheelX, hueWheelY, hueWheelSize, hueWheelSize}
+	cmd.CmdPushConstants(
+		hueWheelPipelineLayout,
+		vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		16, // 4 floats * 4 bytes = 16 bytes
+		unsafe.Pointer(&hueWheelRect[0]),
+	)
+
+	cmd.Draw(6, 1, 0, 0)
+
+	// === Render SV Box ===
+	// Position above the hue wheel, same X position
+	svBoxX := hueWheelX
+	svBoxY := hueWheelY - 220.0
+	svBoxSize := float32(200.0)
+
+	cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, svBoxPipeline)
+
+	// Push constants: vec4 rect + float hue (20 bytes)
+	type SVBoxPushConstants struct {
+		Rect [4]float32 // x, y, width, height
+		Hue  float32    // current hue value
+	}
+
+	svBoxPush := SVBoxPushConstants{
+		Rect: [4]float32{svBoxX, svBoxY, svBoxSize, svBoxSize},
+		Hue:  picker.Hue,
+	}
+
+	cmd.CmdPushConstants(
+		svBoxPipelineLayout,
+		vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		20, // 5 floats * 4 bytes = 20 bytes
+		unsafe.Pointer(&svBoxPush),
+	)
+
+	cmd.Draw(6, 1, 0, 0)
 }
 
 type ImageData struct {
@@ -1535,6 +1763,197 @@ func main() {
 
 		fmt.Println("UI rectangle pipeline created!")
 
+		// ===== Color Picker Pipelines =====
+		fmt.Println("Creating color picker pipelines...")
+
+		// Compile hue wheel shaders
+		hueWheelVertResult, err := compiler.CompileIntoSPV(hueWheelVertexShader, "hue_wheel.vert", shaderc.VertexShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("Hue wheel vertex shader compilation failed: %v", err))
+		}
+		hueWheelVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: hueWheelVertResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(hueWheelVertShader)
+
+		hueWheelFragResult, err := compiler.CompileIntoSPV(hueWheelFragmentShader, "hue_wheel.frag", shaderc.FragmentShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("Hue wheel fragment shader compilation failed: %v", err))
+		}
+		hueWheelFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: hueWheelFragResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(hueWheelFragShader)
+
+		// Hue wheel pipeline layout (push constants: vec4 rect = 16 bytes)
+		hueWheelPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+					Offset:     0,
+					Size:       16, // vec4 rect
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipelineLayout(hueWheelPipelineLayout)
+
+		// Hue wheel pipeline
+		hueWheelPipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
+			Stages: []vk.PipelineShaderStageCreateInfo{
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: hueWheelVertShader, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: hueWheelFragShader, Name: "main"},
+			},
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{Binding: 0, Stride: 8, InputRate: vk.VERTEX_INPUT_RATE_VERTEX}, // vec2 position
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{Location: 0, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 0},
+				},
+			},
+			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			},
+			ViewportState: &vk.PipelineViewportStateCreateInfo{
+				Viewports: nil, // Dynamic viewport
+				Scissors:  nil, // Dynamic scissor
+			},
+			RasterizationState: &vk.PipelineRasterizationStateCreateInfo{
+				PolygonMode: vk.POLYGON_MODE_FILL,
+				CullMode:    vk.CULL_MODE_NONE,
+				FrontFace:   vk.FRONT_FACE_COUNTER_CLOCKWISE,
+				LineWidth:   1.0,
+			},
+			MultisampleState: &vk.PipelineMultisampleStateCreateInfo{
+				RasterizationSamples: vk.SAMPLE_COUNT_1_BIT,
+			},
+			ColorBlendState: &vk.PipelineColorBlendStateCreateInfo{
+				Attachments: []vk.PipelineColorBlendAttachmentState{
+					{
+						BlendEnable:         true,
+						SrcColorBlendFactor: vk.BLEND_FACTOR_SRC_ALPHA,
+						DstColorBlendFactor: vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+						ColorBlendOp:        vk.BLEND_OP_ADD,
+						SrcAlphaBlendFactor: vk.BLEND_FACTOR_ONE,
+						DstAlphaBlendFactor: vk.BLEND_FACTOR_ZERO,
+						AlphaBlendOp:        vk.BLEND_OP_ADD,
+						ColorWriteMask:      vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT,
+					},
+				},
+			},
+			DynamicState: &vk.PipelineDynamicStateCreateInfo{
+				DynamicStates: []vk.DynamicState{vk.DYNAMIC_STATE_VIEWPORT, vk.DYNAMIC_STATE_SCISSOR},
+			},
+			Layout: hueWheelPipelineLayout,
+			RenderingInfo: &vk.PipelineRenderingCreateInfo{
+				ColorAttachmentFormats: []vk.Format{swapFormat},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipeline(hueWheelPipeline)
+
+		// Compile SV box shaders
+		svBoxVertResult, err := compiler.CompileIntoSPV(svBoxVertexShader, "sv_box.vert", shaderc.VertexShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("SV box vertex shader compilation failed: %v", err))
+		}
+		svBoxVertShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: svBoxVertResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(svBoxVertShader)
+
+		svBoxFragResult, err := compiler.CompileIntoSPV(svBoxFragmentShader, "sv_box.frag", shaderc.FragmentShader, options)
+		if err != nil {
+			panic(fmt.Sprintf("SV box fragment shader compilation failed: %v", err))
+		}
+		svBoxFragShader, err := device.CreateShaderModule(&vk.ShaderModuleCreateInfo{Code: svBoxFragResult.GetBytes()})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyShaderModule(svBoxFragShader)
+
+		// SV box pipeline layout (push constants: vec4 rect + float hue = 20 bytes)
+		svBoxPipelineLayout, err := device.CreatePipelineLayout(&vk.PipelineLayoutCreateInfo{
+			PushConstantRanges: []vk.PushConstantRange{
+				{
+					StageFlags: vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT,
+					Offset:     0,
+					Size:       20, // vec4 rect + float hue
+				},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipelineLayout(svBoxPipelineLayout)
+
+		// SV box pipeline (same config as hue wheel)
+		svBoxPipeline, err := device.CreateGraphicsPipeline(&vk.GraphicsPipelineCreateInfo{
+			Stages: []vk.PipelineShaderStageCreateInfo{
+				{Stage: vk.SHADER_STAGE_VERTEX_BIT, Module: svBoxVertShader, Name: "main"},
+				{Stage: vk.SHADER_STAGE_FRAGMENT_BIT, Module: svBoxFragShader, Name: "main"},
+			},
+			VertexInputState: &vk.PipelineVertexInputStateCreateInfo{
+				VertexBindingDescriptions: []vk.VertexInputBindingDescription{
+					{Binding: 0, Stride: 8, InputRate: vk.VERTEX_INPUT_RATE_VERTEX},
+				},
+				VertexAttributeDescriptions: []vk.VertexInputAttributeDescription{
+					{Location: 0, Binding: 0, Format: vk.FORMAT_R32G32_SFLOAT, Offset: 0},
+				},
+			},
+			InputAssemblyState: &vk.PipelineInputAssemblyStateCreateInfo{
+				Topology: vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			},
+			ViewportState: &vk.PipelineViewportStateCreateInfo{
+				Viewports: nil, // Dynamic viewport
+				Scissors:  nil, // Dynamic scissor
+			},
+			RasterizationState: &vk.PipelineRasterizationStateCreateInfo{
+				PolygonMode: vk.POLYGON_MODE_FILL,
+				CullMode:    vk.CULL_MODE_NONE,
+				FrontFace:   vk.FRONT_FACE_COUNTER_CLOCKWISE,
+				LineWidth:   1.0,
+			},
+			MultisampleState: &vk.PipelineMultisampleStateCreateInfo{
+				RasterizationSamples: vk.SAMPLE_COUNT_1_BIT,
+			},
+			ColorBlendState: &vk.PipelineColorBlendStateCreateInfo{
+				Attachments: []vk.PipelineColorBlendAttachmentState{
+					{
+						BlendEnable:         true,
+						SrcColorBlendFactor: vk.BLEND_FACTOR_SRC_ALPHA,
+						DstColorBlendFactor: vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+						ColorBlendOp:        vk.BLEND_OP_ADD,
+						SrcAlphaBlendFactor: vk.BLEND_FACTOR_ONE,
+						DstAlphaBlendFactor: vk.BLEND_FACTOR_ZERO,
+						AlphaBlendOp:        vk.BLEND_OP_ADD,
+						ColorWriteMask:      vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT,
+					},
+				},
+			},
+			DynamicState: &vk.PipelineDynamicStateCreateInfo{
+				DynamicStates: []vk.DynamicState{vk.DYNAMIC_STATE_VIEWPORT, vk.DYNAMIC_STATE_SCISSOR},
+			},
+			Layout: svBoxPipelineLayout,
+			RenderingInfo: &vk.PipelineRenderingCreateInfo{
+				ColorAttachmentFormats: []vk.Format{swapFormat},
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyPipeline(svBoxPipeline)
+
+		fmt.Println("Color picker pipelines created!")
+
 		// Create MULTI-BINDING BINDLESS descriptor pool
 		// 1 set with 8 bindings × 16K textures = 131K total capacity
 		const numBindings = 8
@@ -1673,6 +2092,39 @@ func main() {
 		}
 
 		fmt.Println("Brush vertex buffer created!")
+
+		// Create vertex buffer for color picker (simple quad: 0-1 positions)
+		colorPickerVertices := []float32{
+			// Position (x, y)
+			0.0, 0.0,
+			1.0, 0.0,
+			1.0, 1.0,
+			0.0, 0.0,
+			1.0, 1.0,
+			0.0, 1.0,
+		}
+
+		colorPickerVertexBufferSize := uint64(len(colorPickerVertices) * 4)
+		colorPickerVertexBuffer, colorPickerVertexMemory, err := device.CreateBufferWithMemory(
+			colorPickerVertexBufferSize,
+			vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(colorPickerVertexBuffer)
+		defer device.FreeMemory(colorPickerVertexMemory)
+
+		// Upload color picker vertex data
+		colorPickerVertexData := (*[1 << 30]byte)(unsafe.Pointer(&colorPickerVertices[0]))[:colorPickerVertexBufferSize:colorPickerVertexBufferSize]
+		err = device.UploadToBuffer(colorPickerVertexMemory, colorPickerVertexData)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Color picker vertex buffer created!")
 
 		// Create command pool
 		commandPool, err := device.CreateCommandPool(&vk.CommandPoolCreateInfo{
@@ -2990,8 +3442,9 @@ void main() {
 		// === UI Layer Z-Index Constants ===
 		// Reserve top 256 Z-indices for UI layers (0x7fff00 to 0x7fffff)
 		const (
-			UILayerButtonBase = 0x7ffffe // Button base rectangles (below text)
-			UILayerButtonText = 0x7fffff // Button text labels (on top)
+			UILayerButtonBase  = 0x7ffffd // Button base rectangles (below text)
+			UILayerButtonText  = 0x7ffffe // Button text labels
+			UILayerColorPicker = 0x7fffff // Color picker (on top of all UI)
 		)
 
 		// Helper function to create a UI layer
@@ -3104,11 +3557,18 @@ void main() {
 		defer device.DestroyImageView(uiButtonTextView)
 		defer device.FreeMemory(uiButtonTextMem)
 
+		// Create color picker layer (renders color picker UI)
+		colorPickerLayer, colorPickerImage, colorPickerView, colorPickerMem := createUILayer("ColorPicker", UILayerColorPicker)
+		defer device.DestroyImage(colorPickerImage)
+		defer device.DestroyImageView(colorPickerView)
+		defer device.FreeMemory(colorPickerMem)
+
 		world.MakeScreenSpace(uiButtonBaseLayer, true)
 		world.MakeScreenSpace(uiButtonTextLayer, true)
+		world.MakeScreenSpace(colorPickerLayer, true)
 
 		// Note: Old uiLayer variable removed - now using uiButtonBaseLayer and uiButtonTextLayer
-		fmt.Printf("Created %d UI layers for multi-layer rendering\n", 2)
+		fmt.Printf("Created %d UI layers for multi-layer rendering\n", 3)
 
 		// === Initial Image Layout Transitions ===
 		// Transition layer framebuffers from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
@@ -3234,7 +3694,15 @@ void main() {
 		strokeActive := false
 		isFirstFrameOfStroke := false // Skip interpolation on first frame to avoid (0,0) jolt
 		strokeFrameCount := 0         // Count frames since stroke start for Bezier dampening
-		brushRadius := float32(200.0) // Current brush radius (scaled for 8K canvas)
+		brushRadius := float32(20.0)  // Current brush radius (scaled for 8K canvas)
+
+		// Color picker state
+		colorPicker := ColorPicker{
+			Hue:        0.0,   // Start with red
+			Saturation: 1.0,   // Full saturation
+			Value:      1.0,   // Full brightness
+			Visible:    false, // Hidden by default
+		}
 
 		// Mouse state tracking for UI
 		mouseX := float32(0.0)
@@ -3310,6 +3778,49 @@ void main() {
 					case sdl.EVENT_MOUSE_BUTTON_DOWN:
 						if event.MouseButton.Button == sdl.BUTTON_LEFT {
 							mouseButtonDown = true
+
+							// Check if clicking on color picker (highest priority)
+							if colorPicker.Visible {
+								// Calculate color picker positions
+								hueWheelX := float32(swapExtent.Width) - 220.0
+								hueWheelY := float32(swapExtent.Height) - 220.0
+								hueWheelSize := float32(200.0)
+								svBoxX := hueWheelX
+								svBoxY := hueWheelY - 220.0
+								svBoxSize := float32(200.0)
+
+								// Check if clicking on SV box
+								if mouseX >= svBoxX && mouseX <= svBoxX+svBoxSize &&
+									mouseY >= svBoxY && mouseY <= svBoxY+svBoxSize {
+									// Update saturation and value based on click position
+									colorPicker.Saturation = 1.0 - (mouseX-svBoxX)/svBoxSize
+									colorPicker.Value = 1.0 - (mouseY-svBoxY)/svBoxSize
+									r, g, b := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
+									fmt.Printf("Color selected: RGB(%.2f, %.2f, %.2f)\n", r, g, b)
+								} else if mouseX >= hueWheelX && mouseX <= hueWheelX+hueWheelSize &&
+									mouseY >= hueWheelY && mouseY <= hueWheelY+hueWheelSize {
+									// Check if clicking on hue wheel ring
+									centerX := hueWheelX + hueWheelSize/2.0
+									centerY := hueWheelY + hueWheelSize/2.0
+									dx := mouseX - centerX
+									dy := mouseY - centerY
+									dist := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+									outerRadius := hueWheelSize / 2.0
+									innerRadius := outerRadius * 0.6
+
+									if dist >= innerRadius && dist <= outerRadius {
+										// Calculate hue from angle
+										angle := math.Atan2(float64(dy), float64(dx))
+										hue := float32(angle/(2*math.Pi)) + 0.5 // Normalize to 0-1
+										if hue < 0 {
+											hue += 1.0
+										}
+										colorPicker.Hue = hue
+										r, g, b := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
+										fmt.Printf("Hue selected: %.2f (RGB: %.2f, %.2f, %.2f)\n", hue, r, g, b)
+									}
+								}
+							}
 						} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
 							middleButtonDown = true
 							lastMouseX = mouseX
@@ -3406,6 +3917,16 @@ void main() {
 								blendMode.Opacity = newOpacity
 								actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
 								fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
+							}
+						}
+
+						// 'C' key - Toggle color picker
+						if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_C {
+							colorPicker.Visible = !colorPicker.Visible
+							if colorPicker.Visible {
+								fmt.Println("Color picker shown (press C to hide)")
+							} else {
+								fmt.Println("Color picker hidden")
 							}
 						}
 
@@ -4312,7 +4833,7 @@ void main() {
 					strokeFrameCount++
 				}
 
-				fuck := steps + 1
+				fuck := steps
 
 				// Render brush stamps along interpolated path
 				// IMPORTANT: Each stamp needs its own render pass with ping-pong swap
@@ -4339,6 +4860,16 @@ void main() {
 						}
 					}
 
+					// Get current brush color from color picker
+					brushR, brushG, brushB := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
+
+					// Debug: Print color on first stamp of stroke
+					if i == 0 && strokeFrameCount == 1 {
+						fmt.Printf("[BRUSH] HSV(%.2f, %.2f, %.2f) -> RGB(%.2f, %.2f, %.2f)\n",
+							colorPicker.Hue, colorPicker.Saturation, colorPicker.Value,
+							brushR, brushG, brushB)
+					}
+
 					pushConstants := BrushPushConstants{
 						CanvasWidth:  float32(paintCanvas.GetWidth()),
 						CanvasHeight: float32(paintCanvas.GetHeight()),
@@ -4346,9 +4877,9 @@ void main() {
 						BrushY:       interpY,
 						BrushSize:    brushRadius * interpP,
 						BrushOpacity: 1.0,
-						ColorR:       1.0,
-						ColorG:       0.0,
-						ColorB:       0.0,
+						ColorR:       brushR,
+						ColorG:       brushG,
+						ColorB:       brushB,
 						ColorA:       1.0,
 					}
 
@@ -4508,9 +5039,11 @@ void main() {
 					// Save completed stroke to action history
 					if len(currentStroke) > 0 {
 						// Add new stroke to action history
+						// Get current brush color from color picker
+						strokeR, strokeG, strokeB := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
 						newStroke := Stroke{
 							States: currentStroke,
-							Color:  [4]float32{1.0, 0.0, 0.0, 1.0}, // Red
+							Color:  [4]float32{strokeR, strokeG, strokeB, 1.0},
 							Radius: brushRadius,
 						}
 						actionRecorder.RecordStroke(newStroke)
@@ -4635,6 +5168,13 @@ void main() {
 				} else if entity == uiButtonTextLayer {
 					// Render button text labels only (no rectangles)
 					systems.RenderUIButtonLabels(world, uiCtx)
+				} else if entity == colorPickerLayer {
+					// Render color picker if visible
+					if colorPicker.Visible {
+						renderColorPicker(cmd, &colorPicker, colorPickerVertexBuffer,
+							hueWheelPipeline, hueWheelPipelineLayout,
+							svBoxPipeline, svBoxPipelineLayout, swapExtent)
+					}
 				} else {
 					// Normal layer - render textured quad
 					renderCtx := &systems.RenderContext{
