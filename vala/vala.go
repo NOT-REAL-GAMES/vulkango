@@ -3383,7 +3383,7 @@ void main() {
 							if blendMode != nil {
 								oldOpacity := blendMode.Opacity
 								newOpacity := oldOpacity + 0.1
-								if newOpacity > 1.0 {
+								if newOpacity >= 1.1 {
 									newOpacity = 1.0
 									break
 								}
