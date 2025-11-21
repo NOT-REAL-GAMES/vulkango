@@ -47,13 +47,14 @@ func ChooseSurfaceFormat(availableFormats []SurfaceFormatKHR) SurfaceFormatKHR {
 func ChoosePresentMode(availableModes []PresentModeKHR) PresentModeKHR {
 	// Prefer mailbox (triple buffering) for lowest latency without tearing
 	for _, mode := range availableModes {
-		if mode == PRESENT_MODE_IMMEDIATE_KHR {
+		fmt.Printf("%v", mode)
+		if mode == PRESENT_MODE_MAILBOX_KHR {
 			return mode
 		}
 	}
 
 	// FIFO is always available and is vsync
-	return PRESENT_MODE_FIFO_KHR
+	return PRESENT_MODE_IMMEDIATE_KHR
 }
 
 func ChooseSwapExtent(capabilities SurfaceCapabilitiesKHR, windowWidth, windowHeight uint32) Extent2D {

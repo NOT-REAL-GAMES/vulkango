@@ -2588,13 +2588,6 @@ void main() {
 			panic(err)
 		}
 
-		// Create synchronization objects
-		imageAvailableSem, err := device.CreateSemaphore(&vk.SemaphoreCreateInfo{})
-		if err != nil {
-			panic(err)
-		}
-		defer device.DestroySemaphore(imageAvailableSem)
-
 		const FRAMES_IN_FLIGHT = 3
 
 		var (
@@ -3481,10 +3474,10 @@ void main() {
 			// Wait for previous frame
 			//device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(1000))
 
-			device.WaitForFences([]vk.Fence{inFlightFences[currentFrame]}, false, ^uint64(10))
+			device.WaitForFences([]vk.Fence{inFlightFences[currentFrame]}, false, ^uint64(0))
 
 			// Acquire next image
-			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(1000), imageAvailableSem, vk.Fence{})
+			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(0), imageAvailableSems[currentFrame], vk.Fence{})
 			if err != nil {
 				panic(fmt.Sprintf("Acquire failed: %v", err))
 			}
