@@ -2595,11 +2595,30 @@ void main() {
 		}
 		defer device.DestroySemaphore(imageAvailableSem)
 
-		renderFinishedSem, err := device.CreateSemaphore(&vk.SemaphoreCreateInfo{})
-		if err != nil {
-			panic(err)
+		const FRAMES_IN_FLIGHT = 3
+
+		var (
+			renderFinishedSems [FRAMES_IN_FLIGHT]vk.Semaphore
+			imageAvailableSems [FRAMES_IN_FLIGHT]vk.Semaphore
+		)
+
+		for i := range renderFinishedSems {
+			renderFinishedSems[i], err = device.CreateSemaphore(&vk.SemaphoreCreateInfo{})
+			if err != nil {
+				panic(err)
+			}
+			defer device.DestroySemaphore(renderFinishedSems[i])
+
 		}
-		defer device.DestroySemaphore(renderFinishedSem)
+
+		for i := range imageAvailableSems {
+			imageAvailableSems[i], err = device.CreateSemaphore(&vk.SemaphoreCreateInfo{})
+			if err != nil {
+				panic(err)
+			}
+			defer device.DestroySemaphore(imageAvailableSems[i])
+
+		}
 
 		inFlightFences := make([]vk.Fence, len(swapImages))
 		for i := range inFlightFences {
@@ -3239,9 +3258,208 @@ void main() {
 		lastMouseY := float32(0.0)
 
 		currentLayer := -4999999
+		currentFrame := 0
 
-		imageIndexLast := uint32(0)
+		//imageIndexLast := uint32(0)
 		frameCounter := uint64(0) // For periodic debug logging
+
+		timer := time.Now().UnixMilli()
+
+		go func() {
+			for i := 0; i < 3; i++ {
+				for running {
+					for event, ok := sdl.PollEvent(); ok; event, ok = sdl.PollEvent() {
+						switch event.Type {
+
+						case sdl.EVENT_QUIT:
+							running = false
+
+						case sdl.EVENT_PEN_AXIS:
+							axis := event.PenAxis
+							if axis.Axis == sdl.PEN_AXIS_PRESSURE {
+								penPressure = axis.Value
+								// Ensure minimum pressure for visibility (pen tablets sometimes report low values)
+								/*if penPressure < 0.1 {
+									penPressure = 1.0
+								}*/
+							}
+						case sdl.EVENT_PEN_MOTION:
+							motion := event.PenMotion
+
+							truePenX = motion.X
+							truePenY = motion.Y
+
+							penX = penX + ((motion.X - penX) * max(0.1, min((cameraZoom/10), 1.0)))
+							penY = penY + ((motion.Y - penY) * max(0.1, min((cameraZoom/10), 1.0)))
+
+							penDown = motion.IsDown()
+
+						case sdl.EVENT_MOUSE_MOTION:
+							mouseMotion := event.MouseMotion
+							mouseX = mouseMotion.X
+							mouseY = mouseMotion.Y
+
+							// Handle canvas panning with middle mouse button
+							if middleButtonDown {
+								deltaX := mouseX - lastMouseX
+								deltaY := mouseY - lastMouseY
+								// Convert screen delta to NDC delta (account for zoom)
+								ndcDeltaX := (deltaX / float32(swapExtent.Width)) * 2.0 / cameraZoom
+								ndcDeltaY := (deltaY / float32(swapExtent.Height)) * 2.0 / cameraZoom
+								cameraX -= ndcDeltaX
+								cameraY -= ndcDeltaY
+								lastMouseX = mouseX
+								lastMouseY = mouseY
+							}
+
+						case sdl.EVENT_MOUSE_BUTTON_DOWN:
+							if event.MouseButton.Button == sdl.BUTTON_LEFT {
+								mouseButtonDown = true
+							} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
+								middleButtonDown = true
+								lastMouseX = mouseX
+								lastMouseY = mouseY
+							}
+
+						case sdl.EVENT_MOUSE_BUTTON_UP:
+							if event.MouseButton.Button == sdl.BUTTON_LEFT {
+								mouseButtonDown = false
+							} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
+								middleButtonDown = false
+							}
+
+						case sdl.EVENT_MOUSE_WHEEL:
+							wheel := event.MouseWheel
+							// Calculate world position of mouse before zoom
+							screenCenterX := float32(swapExtent.Width) / 2.0
+							screenCenterY := float32(swapExtent.Height) / 2.0
+							// Mouse position in NDC relative to screen center
+							mouseNDCX := (mouseX - screenCenterX) / screenCenterX
+							mouseNDCY := (mouseY - screenCenterY) / screenCenterY
+							// World position under mouse cursor
+							worldX := mouseNDCX/cameraZoom + cameraX
+							worldY := mouseNDCY/cameraZoom + cameraY
+
+							// Apply zoom
+							zoomFactor := float32(1.0)
+							if wheel.Y > 0 {
+								zoomFactor = 1.1 // Zoom in
+							} else if wheel.Y < 0 {
+								zoomFactor = 0.9 // Zoom out
+							}
+							cameraZoom *= zoomFactor
+
+							// Clamp zoom to reasonable limits
+							if cameraZoom < 0.1 {
+								cameraZoom = 0.1
+							} else if cameraZoom > 10.0 {
+								cameraZoom = 10.0
+							}
+
+							// Adjust camera position to keep world position under mouse
+							cameraX = worldX - mouseNDCX/cameraZoom
+							cameraY = worldY - mouseNDCY/cameraZoom
+
+						case sdl.EVENT_KEY_DOWN:
+							keyEvent := event.Keyboard
+							ctrl := (keyEvent.Mod & sdl.KMOD_CTRL) != 0
+							shift := (keyEvent.Mod & sdl.KMOD_SHIFT) != 0
+
+							// Ctrl+Z - Undo
+							if ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Z {
+								if actionRecorder.Undo() {
+									replayRequested = true
+									fmt.Println("Undo successful")
+								}
+							}
+
+							// Ctrl+Shift+Z or Ctrl+Y - Redo
+							if (ctrl && shift && keyEvent.Scancode == sdl.SCANCODE_Z) ||
+								(ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Y) {
+								if actionRecorder.Redo() {
+									replayRequested = true
+									fmt.Println("Redo successful")
+								}
+							}
+
+							// Up arrow - Increase layer2 opacity (example of OpacityAction)
+							if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_UP {
+								blendMode := world.GetBlendMode(layer2)
+								if blendMode != nil {
+									oldOpacity := blendMode.Opacity
+									newOpacity := oldOpacity + 0.1
+									if newOpacity > 1.0 {
+										newOpacity = 1.0
+										break
+									}
+									blendMode.Opacity = newOpacity
+									actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
+									fmt.Printf("Layer opacity increased to %.2f\n", newOpacity)
+								}
+							}
+
+							// Down arrow - Decrease layer2 opacity
+							if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_DOWN {
+								blendMode := world.GetBlendMode(layer2)
+								if blendMode != nil {
+									oldOpacity := blendMode.Opacity
+									newOpacity := oldOpacity - 0.1
+									if newOpacity < 0.0 {
+										newOpacity = 0.0
+										break
+									}
+									blendMode.Opacity = newOpacity
+									actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
+									fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
+								}
+							}
+
+						case sdl.EVENT_DROP_COMPLETE:
+							fmt.Printf("File loaded!")
+
+						case sdl.EVENT_DROP_TEXT, sdl.EVENT_DROP_FILE:
+							drop := event.Drop
+							filePath := drop.Data
+							fmt.Printf("File dropped: %s\n", filePath)
+
+							// Check if it's an image file
+							ext := strings.ToLower(filepath.Ext(filePath))
+							if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" {
+								fmt.Println("Loading dropped image...")
+								_, err := CreateImageLayer(
+									world,
+									&device,
+									&physicalDevice,
+									&commandPool,
+									&queue,
+									&pipeline,
+									&pipelineLayout,
+									&descriptorPool,
+									&descriptorSetLayout,
+									globalBindlessDescriptorSet,
+									&nextTextureIndex,
+									maxTextures,
+									layerSampler,
+									swapExtent,
+									filePath,
+									currentLayer,
+								)
+								if err != nil {
+									fmt.Printf("Failed to create layer: %v\n", err)
+								} else {
+									currentLayer++
+								}
+							} else {
+								fmt.Printf("Unsupported file type: %s\n", ext)
+							}
+						}
+					}
+				}
+			}
+
+			sdl.Delay(1)
+
+		}()
 
 		for running {
 			frameCounter++
@@ -3250,192 +3468,6 @@ void main() {
 			l2ty := world.GetTransform(layer2).Y
 
 			// Handle events
-			for event, ok := sdl.PollEvent(); ok; event, ok = sdl.PollEvent() {
-				switch event.Type {
-
-				case sdl.EVENT_QUIT:
-					running = false
-
-				case sdl.EVENT_PEN_AXIS:
-					axis := event.PenAxis
-					if axis.Axis == sdl.PEN_AXIS_PRESSURE {
-						penPressure = axis.Value
-						// Ensure minimum pressure for visibility (pen tablets sometimes report low values)
-						/*if penPressure < 0.1 {
-							penPressure = 1.0
-						}*/
-					}
-				case sdl.EVENT_PEN_MOTION:
-					motion := event.PenMotion
-
-					truePenX = motion.X
-					truePenY = motion.Y
-
-					penX = penX + ((motion.X - penX) * max(0.1, min((cameraZoom/10), 1.0)))
-					penY = penY + ((motion.Y - penY) * max(0.1, min((cameraZoom/10), 1.0)))
-
-					penDown = motion.IsDown()
-
-				case sdl.EVENT_MOUSE_MOTION:
-					mouseMotion := event.MouseMotion
-					mouseX = mouseMotion.X
-					mouseY = mouseMotion.Y
-
-					// Handle canvas panning with middle mouse button
-					if middleButtonDown {
-						deltaX := mouseX - lastMouseX
-						deltaY := mouseY - lastMouseY
-						// Convert screen delta to NDC delta (account for zoom)
-						ndcDeltaX := (deltaX / float32(swapExtent.Width)) * 2.0 / cameraZoom
-						ndcDeltaY := (deltaY / float32(swapExtent.Height)) * 2.0 / cameraZoom
-						cameraX -= ndcDeltaX
-						cameraY -= ndcDeltaY
-						lastMouseX = mouseX
-						lastMouseY = mouseY
-					}
-
-				case sdl.EVENT_MOUSE_BUTTON_DOWN:
-					if event.MouseButton.Button == sdl.BUTTON_LEFT {
-						mouseButtonDown = true
-					} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
-						middleButtonDown = true
-						lastMouseX = mouseX
-						lastMouseY = mouseY
-					}
-
-				case sdl.EVENT_MOUSE_BUTTON_UP:
-					if event.MouseButton.Button == sdl.BUTTON_LEFT {
-						mouseButtonDown = false
-					} else if event.MouseButton.Button == sdl.BUTTON_MIDDLE {
-						middleButtonDown = false
-					}
-
-				case sdl.EVENT_MOUSE_WHEEL:
-					wheel := event.MouseWheel
-					// Calculate world position of mouse before zoom
-					screenCenterX := float32(swapExtent.Width) / 2.0
-					screenCenterY := float32(swapExtent.Height) / 2.0
-					// Mouse position in NDC relative to screen center
-					mouseNDCX := (mouseX - screenCenterX) / screenCenterX
-					mouseNDCY := (mouseY - screenCenterY) / screenCenterY
-					// World position under mouse cursor
-					worldX := mouseNDCX/cameraZoom + cameraX
-					worldY := mouseNDCY/cameraZoom + cameraY
-
-					// Apply zoom
-					zoomFactor := float32(1.0)
-					if wheel.Y > 0 {
-						zoomFactor = 1.1 // Zoom in
-					} else if wheel.Y < 0 {
-						zoomFactor = 0.9 // Zoom out
-					}
-					cameraZoom *= zoomFactor
-
-					// Clamp zoom to reasonable limits
-					if cameraZoom < 0.1 {
-						cameraZoom = 0.1
-					} else if cameraZoom > 10.0 {
-						cameraZoom = 10.0
-					}
-
-					// Adjust camera position to keep world position under mouse
-					cameraX = worldX - mouseNDCX/cameraZoom
-					cameraY = worldY - mouseNDCY/cameraZoom
-
-				case sdl.EVENT_KEY_DOWN:
-					keyEvent := event.Keyboard
-					ctrl := (keyEvent.Mod & sdl.KMOD_CTRL) != 0
-					shift := (keyEvent.Mod & sdl.KMOD_SHIFT) != 0
-
-					// Ctrl+Z - Undo
-					if ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Z {
-						if actionRecorder.Undo() {
-							replayRequested = true
-							fmt.Println("Undo successful")
-						}
-					}
-
-					// Ctrl+Shift+Z or Ctrl+Y - Redo
-					if (ctrl && shift && keyEvent.Scancode == sdl.SCANCODE_Z) ||
-						(ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_Y) {
-						if actionRecorder.Redo() {
-							replayRequested = true
-							fmt.Println("Redo successful")
-						}
-					}
-
-					// Up arrow - Increase layer2 opacity (example of OpacityAction)
-					if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_UP {
-						blendMode := world.GetBlendMode(layer2)
-						if blendMode != nil {
-							oldOpacity := blendMode.Opacity
-							newOpacity := oldOpacity + 0.1
-							if newOpacity > 1.0 {
-								newOpacity = 1.0
-								break
-							}
-							blendMode.Opacity = newOpacity
-							actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
-							fmt.Printf("Layer opacity increased to %.2f\n", newOpacity)
-						}
-					}
-
-					// Down arrow - Decrease layer2 opacity
-					if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_DOWN {
-						blendMode := world.GetBlendMode(layer2)
-						if blendMode != nil {
-							oldOpacity := blendMode.Opacity
-							newOpacity := oldOpacity - 0.1
-							if newOpacity < 0.0 {
-								newOpacity = 0.0
-								break
-							}
-							blendMode.Opacity = newOpacity
-							actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
-							fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
-						}
-					}
-
-				case sdl.EVENT_DROP_COMPLETE:
-					fmt.Printf("File loaded!")
-
-				case sdl.EVENT_DROP_TEXT, sdl.EVENT_DROP_FILE:
-					drop := event.Drop
-					filePath := drop.Data
-					fmt.Printf("File dropped: %s\n", filePath)
-
-					// Check if it's an image file
-					ext := strings.ToLower(filepath.Ext(filePath))
-					if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp" {
-						fmt.Println("Loading dropped image...")
-						_, err := CreateImageLayer(
-							world,
-							&device,
-							&physicalDevice,
-							&commandPool,
-							&queue,
-							&pipeline,
-							&pipelineLayout,
-							&descriptorPool,
-							&descriptorSetLayout,
-							globalBindlessDescriptorSet,
-							&nextTextureIndex,
-							maxTextures,
-							layerSampler,
-							swapExtent,
-							filePath,
-							currentLayer,
-						)
-						if err != nil {
-							fmt.Printf("Failed to create layer: %v\n", err)
-						} else {
-							currentLayer++
-						}
-					} else {
-						fmt.Printf("Unsupported file type: %s\n", ext)
-					}
-				}
-			}
 
 			// Update pen data text
 			textComp := world.GetText(helloText)
@@ -3447,15 +3479,16 @@ void main() {
 			// Animate layer2 in a circle
 
 			// Wait for previous frame
-			device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
+			//device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(1000))
+
+			device.WaitForFences([]vk.Fence{inFlightFences[currentFrame]}, false, ^uint64(10))
 
 			// Acquire next image
-			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(0), imageAvailableSem, vk.Fence{})
+			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(1000), imageAvailableSem, vk.Fence{})
 			if err != nil {
 				panic(fmt.Sprintf("Acquire failed: %v", err))
 			}
 
-			device.WaitForFences([]vk.Fence{inFlightFences[imageIndex]}, true, ^uint64(0))
 			device.ResetFences([]vk.Fence{inFlightFences[imageIndex]})
 
 			// Get sorted layers
@@ -4810,10 +4843,10 @@ void main() {
 			// Submit command buffer
 			err = queue.Submit([]vk.SubmitInfo{
 				{
-					WaitSemaphores:   []vk.Semaphore{imageAvailableSem},
+					WaitSemaphores:   []vk.Semaphore{imageAvailableSems[currentFrame]},
 					WaitDstStageMask: []vk.PipelineStageFlags{vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT},
-					CommandBuffers:   []vk.CommandBuffer{cmd},
-					SignalSemaphores: []vk.Semaphore{renderFinishedSem},
+					CommandBuffers:   []vk.CommandBuffer{commandBuffers[imageIndex]},
+					SignalSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				},
 			}, inFlightFences[imageIndex])
 			if err != nil {
@@ -4822,21 +4855,27 @@ void main() {
 
 			// Present
 			queue.PresentKHR(&vk.PresentInfoKHR{
-				WaitSemaphores: []vk.Semaphore{renderFinishedSem},
+				WaitSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				Swapchains:     []vk.SwapchainKHR{swapchain},
 				ImageIndices:   []uint32{imageIndex},
 			})
 
-			imageIndexLast = imageIndex
+			//imageIndexLast = imageIndex
 
 			// Update previous button state at end of frame for next frame's "just pressed" detection
 			mouseButtonDownPrev = mouseButtonDown
 
-			//sdl.Delay(1)
+			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
+
+			if frameCounter%60 == 0 { // Log every 60 frames
+				fmt.Printf("FPS: %d | milliseconds per 60 frames: %d\n", 100000.0/(time.Now().UnixMilli()-timer), time.Now().UnixMilli()-timer)
+				timer = time.Now().UnixMilli()
+			}
+
 		}
 
 		// Wait for device to finish
-		device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
+		//device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(0))
 
 	}
 }
