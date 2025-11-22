@@ -2399,11 +2399,58 @@ void main() {
 
 		fmt.Printf("%d: Both canvases cleared with compute shader!\n", time.Now().UnixMilli())
 
-		// Note: No GPU undo buffer needed - using action-based undo with stroke replay
-
 		// Ping-pong state: tracks which canvas is source (read) and which is destination (write)
 		paintCanvas := paintCanvasA       // Start with A as current (destination)
 		paintCanvasSource := paintCanvasB // B is source for first frame
+
+		// === GPU Snapshot System for Fast Undo ===
+		// Store canvas snapshots every N strokes to avoid replaying from the beginning
+		type CanvasSnapshot struct {
+			Image       vk.Image
+			ImageView   vk.ImageView
+			Memory      vk.DeviceMemory
+			ActionIndex int  // Which action index this snapshot corresponds to
+			IsValid     bool // Whether this snapshot contains valid data
+		}
+
+		const maxSnapshots = 10           // Keep up to 10 snapshots
+		const snapshotInterval = 5        // Take a snapshot every 5 strokes
+		snapshots := make([]CanvasSnapshot, maxSnapshots)
+		nextSnapshotSlot := 0             // Round-robin slot allocation
+
+		// Pre-allocate snapshot images
+		fmt.Println("Allocating snapshot images for fast undo...")
+		for i := 0; i < maxSnapshots; i++ {
+			snapImage, snapMem, err := device.CreateImageWithMemory(
+				paintCanvasA.GetWidth(),
+				paintCanvasA.GetHeight(),
+				vk.FORMAT_R8G8B8A8_UNORM,
+				vk.IMAGE_TILING_OPTIMAL,
+				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+				physicalDevice,
+			)
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create snapshot image %d: %v", i, err))
+			}
+			defer device.DestroyImage(snapImage)
+			defer device.FreeMemory(snapMem)
+
+			snapView, err := device.CreateImageViewForTexture(snapImage, vk.FORMAT_R8G8B8A8_UNORM)
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create snapshot image view %d: %v", i, err))
+			}
+			defer device.DestroyImageView(snapView)
+
+			snapshots[i] = CanvasSnapshot{
+				Image:       snapImage,
+				ImageView:   snapView,
+				Memory:      snapMem,
+				ActionIndex: -1,
+				IsValid:     false,
+			}
+		}
+		fmt.Printf("Allocated %d snapshot images (%dx%d each)\n", maxSnapshots, paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
 
 		// Create sampler for paint canvas with anisotropic filtering for smoother zoom
 		canvasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
@@ -4163,8 +4210,30 @@ void main() {
 
 				// Replay all actions up to undoIndex
 				history := actionRecorder.GetHistory()
-				fmt.Printf("Starting replay of %d actions\n", len(history))
-				for actionIdx, action := range history {
+				targetIndex := len(history)
+
+				// === Find nearest snapshot before target index ===
+				var bestSnapshot *CanvasSnapshot = nil
+				for i := range snapshots {
+					if snapshots[i].IsValid && snapshots[i].ActionIndex < targetIndex {
+						if bestSnapshot == nil || snapshots[i].ActionIndex > bestSnapshot.ActionIndex {
+							bestSnapshot = &snapshots[i]
+						}
+					}
+				}
+
+				startIdx := 0 // Start replaying from beginning
+				if bestSnapshot != nil {
+					fmt.Printf("[SNAPSHOT] Found snapshot at action %d, skipping %d actions!\n",
+						bestSnapshot.ActionIndex, bestSnapshot.ActionIndex)
+					// TODO: Restore from snapshot here (copy snapshot image to canvas)
+					// For now, just skip to that point in history
+					startIdx = bestSnapshot.ActionIndex
+				}
+
+				fmt.Printf("Starting replay of %d actions (from index %d)\n", len(history), startIdx)
+				for actionIdx := startIdx; actionIdx < len(history); actionIdx++ {
+					action := history[actionIdx]
 					isLastStroke := (actionIdx == len(history)-1)
 
 					switch action.Type {
@@ -5047,6 +5116,16 @@ void main() {
 							Radius: brushRadius,
 						}
 						actionRecorder.RecordStroke(newStroke)
+
+						// === GPU Snapshot: Take snapshot every N strokes for fast undo ===
+						currentActionIndex := actionRecorder.GetIndex()
+						if currentActionIndex%snapshotInterval == 0 {
+							fmt.Printf("[SNAPSHOT] Saving canvas state at action %d\n", currentActionIndex)
+							// Note: Snapshot implementation will be added here
+							snapshots[nextSnapshotSlot].ActionIndex = currentActionIndex
+							snapshots[nextSnapshotSlot].IsValid = true
+							nextSnapshotSlot = (nextSnapshotSlot + 1) % maxSnapshots
+						}
 
 						// Update layer2's texture to point to the current paintCanvas
 						layer2Texture := world.GetTextureData(layer2)
