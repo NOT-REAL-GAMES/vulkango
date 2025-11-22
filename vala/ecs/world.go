@@ -22,6 +22,9 @@ type World struct {
 	texts           map[Entity]*Text
 	uiButtons       map[Entity]*UIButton
 	screenSpaces    map[Entity]*ScreenSpace
+	parents         map[Entity]*Parent
+	children        map[Entity]*Children
+	layerGroups     map[Entity]*LayerGroup
 
 	// Track all living entities for iteration
 	entities map[Entity]bool
@@ -39,6 +42,9 @@ func NewWorld() *World {
 		texts:           make(map[Entity]*Text),
 		uiButtons:       make(map[Entity]*UIButton),
 		screenSpaces:    make(map[Entity]*ScreenSpace),
+		parents:         make(map[Entity]*Parent),
+		children:        make(map[Entity]*Children),
+		layerGroups:     make(map[Entity]*LayerGroup),
 		entities:        make(map[Entity]bool),
 	}
 }
@@ -303,5 +309,135 @@ func (w *World) MakeScreenSpaceWithEntities(entity Entity, relatedEntities ...En
 	w.SetScreenSpace(entity, true)
 	for _, e := range relatedEntities {
 		w.SetScreenSpace(e, true)
+	}
+}
+
+// ===== Parent Component =====
+
+func (w *World) AddParent(entity Entity, parent *Parent) {
+	w.parents[entity] = parent
+}
+
+func (w *World) GetParent(entity Entity) *Parent {
+	return w.parents[entity]
+}
+
+func (w *World) HasParent(entity Entity) bool {
+	_, exists := w.parents[entity]
+	return exists
+}
+
+func (w *World) RemoveParent(entity Entity) {
+	delete(w.parents, entity)
+}
+
+// ===== Children Component =====
+
+func (w *World) AddChildren(entity Entity, children *Children) {
+	w.children[entity] = children
+}
+
+func (w *World) GetChildren(entity Entity) *Children {
+	return w.children[entity]
+}
+
+func (w *World) HasChildren(entity Entity) bool {
+	_, exists := w.children[entity]
+	return exists
+}
+
+func (w *World) RemoveChildren(entity Entity) {
+	delete(w.children, entity)
+}
+
+// ===== LayerGroup Component =====
+
+func (w *World) AddLayerGroup(entity Entity, group *LayerGroup) {
+	w.layerGroups[entity] = group
+}
+
+func (w *World) GetLayerGroup(entity Entity) *LayerGroup {
+	return w.layerGroups[entity]
+}
+
+func (w *World) HasLayerGroup(entity Entity) bool {
+	_, exists := w.layerGroups[entity]
+	return exists
+}
+
+func (w *World) RemoveLayerGroup(entity Entity) {
+	delete(w.layerGroups, entity)
+}
+
+// ===== Layer Group Helper Methods =====
+
+// IsGroup returns true if the entity is a layer group.
+func (w *World) IsGroup(entity Entity) bool {
+	return w.HasLayerGroup(entity)
+}
+
+// IsRootLayer returns true if the entity has no parent (root level).
+func (w *World) IsRootLayer(entity Entity) bool {
+	parent := w.GetParent(entity)
+	return parent == nil || parent.ParentEntity == 0
+}
+
+// GetRootLayers returns all entities that have no parent.
+func (w *World) GetRootLayers() []Entity {
+	result := make([]Entity, 0)
+	for entity := range w.entities {
+		if w.IsRootLayer(entity) && (w.HasTransform(entity) || w.HasLayerGroup(entity)) {
+			result = append(result, entity)
+		}
+	}
+	return result
+}
+
+// AddChildToGroup adds a child entity to a group's children list
+// and sets the child's parent to the group.
+func (w *World) AddChildToGroup(groupEntity, childEntity Entity) {
+	// Ensure group has Children component
+	children := w.GetChildren(groupEntity)
+	if children == nil {
+		children = NewChildren()
+		w.AddChildren(groupEntity, children)
+	}
+
+	// Add child to group's children list (if not already there)
+	for _, existing := range children.ChildEntities {
+		if existing == childEntity {
+			return // Already a child
+		}
+	}
+	children.ChildEntities = append(children.ChildEntities, childEntity)
+
+	// Set child's parent
+	parent := w.GetParent(childEntity)
+	if parent == nil {
+		parent = NewParent()
+		w.AddParent(childEntity, parent)
+	}
+	parent.ParentEntity = groupEntity
+}
+
+// RemoveChildFromGroup removes a child entity from a group.
+func (w *World) RemoveChildFromGroup(groupEntity, childEntity Entity) {
+	children := w.GetChildren(groupEntity)
+	if children == nil {
+		return
+	}
+
+	// Remove from children list
+	for i, child := range children.ChildEntities {
+		if child == childEntity {
+			children.ChildEntities = append(children.ChildEntities[:i], children.ChildEntities[i+1:]...)
+			break
+		}
+	}
+
+	// Clear child's parent
+	parent := w.GetParent(childEntity)
+	if parent != nil {
+		parent.ParentEntity = 0
 	}
 }

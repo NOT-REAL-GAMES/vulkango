@@ -203,3 +203,42 @@ func NewScreenSpace() *ScreenSpace {
 		Enabled: true,
 	}
 }
+
+// Parent component tracks which group this layer belongs to.
+// If ParentEntity == 0, the layer is at root level (no parent).
+type Parent struct {
+	ParentEntity Entity // The group entity this layer belongs to (0 = root level)
+}
+
+// Children component tracks child layers in a group.
+// Only group entities have this component.
+type Children struct {
+	ChildEntities []Entity // List of child layer entities
+}
+
+// LayerGroup component marks an entity as a layer group.
+// Groups composite their children to their own framebuffer.
+type LayerGroup struct {
+	Expanded bool // UI state - whether the group is expanded in the layer panel
+}
+
+// NewParent creates a Parent component with no parent (root level).
+func NewParent() *Parent {
+	return &Parent{
+		ParentEntity: 0,
+	}
+}
+
+// NewChildren creates an empty Children component.
+func NewChildren() *Children {
+	return &Children{
+		ChildEntities: make([]Entity, 0),
+	}
+}
+
+// NewLayerGroup creates a LayerGroup component with expanded=true by default.
+func NewLayerGroup() *LayerGroup {
+	return &LayerGroup{
+		Expanded: true,
+	}
+}

@@ -167,8 +167,8 @@ void main() {
         texColor = texture(textures7[nonuniformEXT(arrayIndex)], fragTexCoord);
     }
 
-    // Apply layer opacity to the alpha channel
-    outColor = vec4(texColor.rgb, texColor.a * layer.opacity);
+    // Apply layer opacity to both RGB and alpha (for proper transparency)
+    outColor = texColor * layer.opacity;
 }
 `
 
@@ -2359,7 +2359,7 @@ void main() {
 			cmd.PushConstants(clearPipelineLayout, vk.SHADER_STAGE_COMPUTE_BIT, 0, pushData)
 
 			// Dispatch compute shader (2048/16 = 512 work groups per dimension)
-			cmd.Dispatch(128, 128, 1)
+			//cmd.Dispatch(128, 128, 1)
 
 			// Transition to SHADER_READ_ONLY for fragment shader access
 			cmd.PipelineBarrier(
@@ -2413,10 +2413,10 @@ void main() {
 			IsValid     bool // Whether this snapshot contains valid data
 		}
 
-		const maxSnapshots = 10           // Keep up to 10 snapshots
-		const snapshotInterval = 5        // Take a snapshot every 5 strokes
+		const maxSnapshots = 10    // Keep up to 10 snapshots
+		const snapshotInterval = 5 // Take a snapshot every 5 strokes
 		snapshots := make([]CanvasSnapshot, maxSnapshots)
-		nextSnapshotSlot := 0             // Round-robin slot allocation
+		nextSnapshotSlot := 0 // Round-robin slot allocation
 
 		// Pre-allocate snapshot images
 		fmt.Println("Allocating snapshot images for fast undo...")
@@ -3229,36 +3229,103 @@ void main() {
 			Height:      swapExtent.Height,
 		})
 
-		// Create composite descriptor set for layer 1
-		// BINDLESS: 		layer1CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
-		// BINDLESS: 			DescriptorPool: compositeDescriptorPool,
-		// BINDLESS: 			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
-		// BINDLESS: 		})
-		// BINDLESS: 		if err != nil {
-		// BINDLESS: 			panic(fmt.Sprintf("Failed to allocate layer 1 composite descriptor set: %v", err))
-		// BINDLESS: 		}
-		// BINDLESS: 		layer1CompositeDescSet := layer1CompositeSets[0]
-		// BINDLESS:
-		// BINDLESS: 		// Update descriptor set to bind layer1's framebuffer texture
-		// BINDLESS: 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
-		// BINDLESS: 			{
-		// BINDLESS: 				DstSet:          layer1CompositeDescSet,
-		// BINDLESS: 				DstBinding:      0,
-		// BINDLESS: 				DstArrayElement: 0,
-		// BINDLESS: 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		// BINDLESS: 				ImageInfo: []vk.DescriptorImageInfo{
-		// BINDLESS: 					{
-		// BINDLESS: 						Sampler:     layerSampler,
-		// BINDLESS: 						ImageView:   layer1ImageView,
-		// BINDLESS: 						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		// BINDLESS: 					},
-		// BINDLESS: 				},
-		// BINDLESS: 			},
-		// BINDLESS: 		})
+		// ===== Create Background Layer =====
+		fmt.Println("\n=== Creating Background Layer ===")
+		layerBg := world.CreateEntity()
+		fmt.Printf("Created background layer entity: %d\n", layerBg)
 
-		// BINDLESS: 		// Update layer1's VulkanPipeline with composite descriptor set
-		// BINDLESS: 		layer1Pipeline := world.GetVulkanPipeline(layer1)
-		// BINDLESS: 		layer1Pipeline.CompositeDescriptorSet = layer1CompositeDescSet
+		// Add Transform component (ZIndex 0 - between bear and paint layer)
+		transformBg := ecs.NewTransform()
+		transformBg.ZIndex = 0
+		world.AddTransform(layerBg, transformBg)
+
+		// Create framebuffer for background layer
+		layerBgImage, layerBgImageMemory, err := device.CreateImageWithMemory(
+			swapExtent.Width,
+			swapExtent.Height,
+			vk.FORMAT_R8G8B8A8_UNORM,
+			vk.IMAGE_TILING_OPTIMAL,
+			vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create background layer framebuffer image: %v", err))
+		}
+		defer device.DestroyImage(layerBgImage)
+		defer device.FreeMemory(layerBgImageMemory)
+
+		layerBgImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+			Image:    layerBgImage,
+			ViewType: vk.IMAGE_VIEW_TYPE_2D,
+			Format:   vk.FORMAT_R8G8B8A8_UNORM,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create background layer image view: %v", err))
+		}
+		defer device.DestroyImageView(layerBgImageView)
+
+		// Add RenderTarget component for background layer
+		world.AddRenderTarget(layerBg, &ecs.RenderTarget{
+			Image:       layerBgImage,
+			ImageView:   layerBgImageView,
+			ImageMemory: layerBgImageMemory,
+			Format:      vk.FORMAT_R8G8B8A8_UNORM,
+			Width:       swapExtent.Width,
+			Height:      swapExtent.Height,
+		})
+
+		// Assign bindless texture index for background layer
+		layerBgTextureIndex := assignNextTextureIndex()
+		fmt.Printf("Assigned texture index %d to background layer\n", layerBgTextureIndex)
+
+		// Upload background layer framebuffer to global bindless descriptor set
+		bindingBg := layerBgTextureIndex / texturesPerBinding
+		arrayElementBg := layerBgTextureIndex % texturesPerBinding
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          globalBindlessDescriptorSet,
+				DstBinding:      bindingBg,
+				DstArrayElement: arrayElementBg,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{{
+					Sampler:     layerSampler,
+					ImageView:   layerBgImageView,
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				}},
+			},
+		})
+
+		world.AddTextureData(layerBg, &ecs.TextureData{
+			Image:        layerBgImage,
+			ImageView:    layerBgImageView,
+			ImageMemory:  layerBgImageMemory,
+			Sampler:      layerSampler,
+			Width:        swapExtent.Width,
+			Height:       swapExtent.Height,
+			TextureIndex: layerBgTextureIndex,
+		})
+
+		// Add VulkanPipeline component (required for QueryRenderables)
+		world.AddVulkanPipeline(layerBg, &ecs.VulkanPipeline{
+			Pipeline:            pipeline,
+			PipelineLayout:      pipelineLayout,
+			DescriptorPool:      descriptorPool,
+			DescriptorSet:       vk.DescriptorSet{},
+			DescriptorSetLayout: descriptorSetLayout,
+		})
+
+		// Add BlendMode component (visible, opaque)
+		world.AddBlendMode(layerBg, ecs.NewBlendMode())
+
+		fmt.Printf("Background layer configured\n")
 
 		// Create a second layer entity (demonstrating multi-layer support)
 		layer2 := world.CreateEntity()
@@ -3313,7 +3380,8 @@ void main() {
 
 		// Add BlendMode component with different opacity
 		blendMode2 := ecs.NewBlendMode()
-		blendMode2.Opacity = 0.5 // 50% transparent
+		blendMode2.Opacity = 0.5      // 50% transparent
+		blendMode2.SavedOpacity = 0.5 // IMPORTANT: Set SavedOpacity too, or it defaults to 1.0!
 		world.AddBlendMode(layer2, blendMode2)
 
 		// Create framebuffer for layer 2
@@ -3361,6 +3429,117 @@ void main() {
 
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
+
+		// ===== TEST: Create a layer group and put bear inside it =====
+		fmt.Println("\n=== Creating Test Layer Group ===")
+		testGroup := world.CreateEntity()
+		fmt.Printf("Created test group entity: %d\n", testGroup)
+
+		// Add LayerGroup component
+		world.AddLayerGroup(testGroup, ecs.NewLayerGroup())
+
+		// Add Transform (ZIndex between background and bear)
+		groupTransform := ecs.NewTransform()
+		groupTransform.ZIndex = -4000000 // Between background (0) and bear (-5000000)
+		world.AddTransform(testGroup, groupTransform)
+
+		// Create framebuffer for the group (where children will render)
+		groupImage, groupImageMemory, err := device.CreateImageWithMemory(
+			swapExtent.Width,
+			swapExtent.Height,
+			vk.FORMAT_R8G8B8A8_UNORM,
+			vk.IMAGE_TILING_OPTIMAL,
+			vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT|vk.IMAGE_USAGE_SAMPLED_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create group framebuffer image: %v", err))
+		}
+		defer device.DestroyImage(groupImage)
+		defer device.FreeMemory(groupImageMemory)
+
+		groupImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+			Image:    groupImage,
+			ViewType: vk.IMAGE_VIEW_TYPE_2D,
+			Format:   vk.FORMAT_R8G8B8A8_UNORM,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create group image view: %v", err))
+		}
+		defer device.DestroyImageView(groupImageView)
+
+		// Add RenderTarget for the group
+		world.AddRenderTarget(testGroup, &ecs.RenderTarget{
+			Image:       groupImage,
+			ImageView:   groupImageView,
+			ImageMemory: groupImageMemory,
+			Format:      vk.FORMAT_R8G8B8A8_UNORM,
+			Width:       swapExtent.Width,
+			Height:      swapExtent.Height,
+		})
+
+		// Assign bindless texture index for the group
+		groupTextureIndex := assignNextTextureIndex()
+		fmt.Printf("Assigned texture index %d to test group\n", groupTextureIndex)
+
+		// Upload group framebuffer to global bindless descriptor set
+		bindingGroup := groupTextureIndex / texturesPerBinding
+		arrayElementGroup := groupTextureIndex % texturesPerBinding
+		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			{
+				DstSet:          globalBindlessDescriptorSet,
+				DstBinding:      bindingGroup,
+				DstArrayElement: arrayElementGroup,
+				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+				ImageInfo: []vk.DescriptorImageInfo{{
+					Sampler:     layerSampler,
+					ImageView:   groupImageView,
+					ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				}},
+			},
+		})
+
+		world.AddTextureData(testGroup, &ecs.TextureData{
+			Image:        groupImage,
+			ImageView:    groupImageView,
+			ImageMemory:  groupImageMemory,
+			Sampler:      layerSampler,
+			Width:        swapExtent.Width,
+			Height:       swapExtent.Height,
+			TextureIndex: groupTextureIndex,
+		})
+
+		// Add VulkanPipeline (required for QueryRenderables)
+		world.AddVulkanPipeline(testGroup, &ecs.VulkanPipeline{
+			Pipeline:            pipeline,
+			PipelineLayout:      pipelineLayout,
+			DescriptorPool:      descriptorPool,
+			DescriptorSet:       vk.DescriptorSet{},
+			DescriptorSetLayout: descriptorSetLayout,
+		})
+
+		// Add BlendMode (visible, opaque)
+		groupBlend := ecs.NewBlendMode()
+		groupBlend.Opacity = 0.5 // 50% transparent
+		world.AddBlendMode(testGroup, groupBlend)
+
+		// Add the bear (layer1) as a child of this group
+		world.AddChildToGroup(testGroup, layer1)
+		fmt.Printf("Added bear (layer1=%d) as child of test group\n", layer1)
+
+		// Verify the relationship
+		children := world.GetChildren(testGroup)
+		parent := world.GetParent(layer1)
+		fmt.Printf("Test group children: %v\n", children.ChildEntities)
+		fmt.Printf("Bear's parent: %d (should be %d)\n", parent.ParentEntity, testGroup)
 
 		// Create "Hello World!" text entity
 		helloText := world.CreateEntity()
@@ -3758,10 +3937,15 @@ void main() {
 						axis := event.PenAxis
 						if axis.Axis == sdl.PEN_AXIS_PRESSURE {
 							penPressure = axis.Value
-							// Ensure minimum pressure for visibility (pen tablets sometimes report low values)
-							/*if penPressure < 0.1 {
-								penPressure = 1.0
-							}*/
+
+							// Detect pen-up when pressure goes to 0 (fixes stroke not ending when lifting pen)
+							if penPressure <= 0.01 && penDown {
+								penDown = false
+								fmt.Println("[PEN] Pen up detected via pressure = 0")
+							} else if penPressure > 0.01 && !penDown {
+								penDown = true
+								fmt.Println("[PEN] Pen down detected via pressure > 0")
+							}
 						}
 					case sdl.EVENT_PEN_MOTION:
 						motion := event.PenMotion
@@ -3995,6 +4179,11 @@ void main() {
 		}()
 
 		for running {
+			go func() {
+				if !running {
+					return
+				}
+			}()
 			//currentFrameLast = currentFrame
 			frameCounter++
 
@@ -4035,6 +4224,7 @@ void main() {
 
 			// === ACTION-BASED REPLAY: Clear and redraw all strokes ===
 			if replayRequested {
+				fmt.Printf("\n=== REPLAY TRIGGERED ===\n")
 				fmt.Printf("Replaying canvas: %d actions\n", actionRecorder.GetIndex())
 
 				// Reset canvas pointers to initial state before replay
@@ -4089,12 +4279,12 @@ void main() {
 					},
 				)
 
-				// Clear both canvases to white
-				whiteColor := vk.ClearColorValue{Float32: [4]float32{1.0, 1.0, 1.0, 1.0}}
+				// Clear both canvases to transparent (not white, or it will obscure background layer!)
+				transparentColor := vk.ClearColorValue{Float32: [4]float32{0.0, 0.0, 0.0, 0.0}}
 				cmd.CmdClearColorImage(
 					paintCanvasA.GetImage(),
 					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					&whiteColor,
+					&transparentColor,
 					[]vk.ImageSubresourceRange{
 						{
 							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
@@ -4108,7 +4298,7 @@ void main() {
 				cmd.CmdClearColorImage(
 					paintCanvasB.GetImage(),
 					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					&whiteColor,
+					&transparentColor,
 					[]vk.ImageSubresourceRange{
 						{
 							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
@@ -4183,31 +4373,207 @@ void main() {
 				targetIndex := len(history)
 
 				// === Find nearest snapshot before target index ===
+				fmt.Printf("[SNAPSHOT DEBUG] Looking for snapshots before target index %d:\n", targetIndex)
+				for i := range snapshots {
+					fmt.Printf("  Snapshot %d: Valid=%v, ActionIndex=%d\n", i, snapshots[i].IsValid, snapshots[i].ActionIndex)
+				}
 				var bestSnapshot *CanvasSnapshot = nil
+				bestSnapshotSlot := -1
 				for i := range snapshots {
 					if snapshots[i].IsValid && snapshots[i].ActionIndex < targetIndex {
-						if bestSnapshot == nil || snapshots[i].ActionIndex > bestSnapshot.ActionIndex {
+						// Pick snapshot with highest ActionIndex, or if tied, highest slot (most recent)
+						if bestSnapshot == nil ||
+							snapshots[i].ActionIndex > bestSnapshot.ActionIndex ||
+							(snapshots[i].ActionIndex == bestSnapshot.ActionIndex && i > bestSnapshotSlot) {
 							bestSnapshot = &snapshots[i]
+							bestSnapshotSlot = i
 						}
 					}
 				}
 
 				startIdx := 0 // Start replaying from beginning
 				if bestSnapshot != nil {
-					fmt.Printf("[SNAPSHOT] Found snapshot at action %d, skipping %d actions!\n",
-						bestSnapshot.ActionIndex, bestSnapshot.ActionIndex)
-					// TODO: Restore from snapshot here (copy snapshot image to canvas)
-					// For now, just skip to that point in history
+					fmt.Printf("[SNAPSHOT] Found snapshot at action %d (slot %d), skipping %d actions!\n",
+						bestSnapshot.ActionIndex, bestSnapshotSlot, bestSnapshot.ActionIndex)
 					startIdx = bestSnapshot.ActionIndex
+
+					// Restore snapshot image to paintCanvasB (the SOURCE, not destination!)
+					// The descriptor set reads from paintCanvasSource which is B
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{
+							{
+								SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+								DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+								OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								SrcQueueFamilyIndex: ^uint32(0),
+								DstQueueFamilyIndex: ^uint32(0),
+								Image:               paintCanvasB.GetImage(),
+								SubresourceRange: vk.ImageSubresourceRange{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									BaseMipLevel:   0,
+									LevelCount:     1,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+							},
+						},
+					)
+
+					cmd.CmdCopyImage(
+						bestSnapshot.Image,
+						vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						paintCanvasB.GetImage(),
+						vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						[]vk.ImageCopy{
+							{
+								SrcSubresource: vk.ImageSubresourceLayers{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									MipLevel:       0,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+								SrcOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+								DstSubresource: vk.ImageSubresourceLayers{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									MipLevel:       0,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+								DstOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+								Extent:    vk.Extent3D{Width: paintCanvasB.GetWidth(), Height: paintCanvasB.GetHeight(), Depth: 1},
+							},
+						},
+					)
+
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{
+							{
+								SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+								DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+								OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								SrcQueueFamilyIndex: ^uint32(0),
+								DstQueueFamilyIndex: ^uint32(0),
+								Image:               paintCanvasB.GetImage(),
+								SubresourceRange: vk.ImageSubresourceRange{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									BaseMipLevel:   0,
+									LevelCount:     1,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+							},
+						},
+					)
+
+					// IMPORTANT: Also copy snapshot to paintCanvasA (destination)!
+					// The brush shader only writes pixels covered by stamps, so uncovered pixels
+					// in the destination need to have the snapshot content as background.
+					fmt.Printf("[SNAPSHOT] Also copying snapshot to paintCanvasA (destination) for proper background\n")
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{
+							{
+								SrcAccessMask:       0,
+								DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+								OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								SrcQueueFamilyIndex: ^uint32(0),
+								DstQueueFamilyIndex: ^uint32(0),
+								Image:               paintCanvasA.GetImage(),
+								SubresourceRange: vk.ImageSubresourceRange{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									BaseMipLevel:   0,
+									LevelCount:     1,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+							},
+						},
+					)
+
+					cmd.CmdCopyImage(
+						bestSnapshot.Image,
+						vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						paintCanvasA.GetImage(),
+						vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						[]vk.ImageCopy{
+							{
+								SrcSubresource: vk.ImageSubresourceLayers{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									MipLevel:       0,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+								SrcOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+								DstSubresource: vk.ImageSubresourceLayers{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									MipLevel:       0,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+								DstOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+								Extent:    vk.Extent3D{Width: paintCanvasA.GetWidth(), Height: paintCanvasA.GetHeight(), Depth: 1},
+							},
+						},
+					)
+
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{
+							{
+								SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+								DstAccessMask:       vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+								OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								NewLayout:           vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+								SrcQueueFamilyIndex: ^uint32(0),
+								DstQueueFamilyIndex: ^uint32(0),
+								Image:               paintCanvasA.GetImage(),
+								SubresourceRange: vk.ImageSubresourceRange{
+									AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+									BaseMipLevel:   0,
+									LevelCount:     1,
+									BaseArrayLayer: 0,
+									LayerCount:     1,
+								},
+							},
+						},
+					)
+
+					fmt.Printf("[SNAPSHOT] Canvas restored from snapshot to BOTH A and B\n")
 				}
 
-				fmt.Printf("Starting replay of %d actions (from index %d)\n", len(history), startIdx)
-				for actionIdx := startIdx; actionIdx < len(history); actionIdx++ {
+				fmt.Printf("[SNAPSHOT DEBUG] Starting replay of %d actions (from index %d to %d)\n", len(history), startIdx, targetIndex)
+				if bestSnapshot != nil {
+					fmt.Printf("[SNAPSHOT DEBUG] Using snapshot from slot with ActionIndex=%d (skipping stroke rendering for actions 0-%d)\n", bestSnapshot.ActionIndex, startIdx-1)
+				} else {
+					fmt.Printf("[SNAPSHOT DEBUG] No snapshot found, replaying from scratch\n")
+				}
+				// Always process ALL actions to ensure layer state changes are applied!
+				// But only render strokes starting from startIdx (snapshot covers earlier strokes)
+				for actionIdx := 0; actionIdx < len(history); actionIdx++ {
 					action := history[actionIdx]
 					isLastStroke := (actionIdx == len(history)-1)
 
 					switch action.Type {
 					case ActionTypeStroke:
+						// Skip strokes that are already in the snapshot
+						if actionIdx < startIdx {
+							fmt.Printf("  Skipping stroke %d/%d (covered by snapshot)\n", actionIdx+1, len(history))
+							continue
+						}
+
 						// Replay stroke action
 						if action.Stroke == nil || len(action.Stroke.States) == 0 {
 							continue
@@ -4542,8 +4908,149 @@ void main() {
 									},
 								},
 							})
-						} else {
-							fmt.Printf("    Skipping swap (last stroke) - paintCanvas points to result\n")
+						}
+
+						// === Save snapshot at intervals during replay ===
+						// After swap (if swapped), result is in paintCanvasSource
+						// If no swap (last stroke), result is in paintCanvas
+						if (actionIdx+1)%snapshotInterval == 0 {
+							fmt.Printf("[SNAPSHOT] Saving canvas state at ActionIndex=%d (slot %d), isLastStroke=%v, targetIdx=%d\n",
+								actionIdx+1, nextSnapshotSlot, isLastStroke, targetIndex)
+
+							// Determine which canvas has the result
+							var resultCanvas canvas.Canvas
+							var canvasName string
+							if !isLastStroke {
+								// We swapped, so result is in paintCanvasSource
+								resultCanvas = paintCanvasSource
+								canvasName = "paintCanvasSource"
+							} else {
+								// Didn't swap, result is in paintCanvas
+								resultCanvas = paintCanvas
+								canvasName = "paintCanvas"
+							}
+							fmt.Printf("[SNAPSHOT] Copying from %s to snapshot slot %d\n", canvasName, nextSnapshotSlot)
+
+							// Copy result canvas to snapshot
+							// IMPORTANT: Snapshot might be in TRANSFER_SRC if previously used!
+							snapshotOldLayout := vk.IMAGE_LAYOUT_UNDEFINED
+							snapshotSrcAccess := vk.AccessFlags(0)
+							if snapshots[nextSnapshotSlot].IsValid {
+								snapshotOldLayout = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+								snapshotSrcAccess = vk.ACCESS_TRANSFER_READ_BIT
+							}
+							cmd.PipelineBarrier(
+								vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+								vk.PIPELINE_STAGE_TRANSFER_BIT,
+								0,
+								[]vk.ImageMemoryBarrier{
+									{
+										SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+										DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+										OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+										NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+										SrcQueueFamilyIndex: ^uint32(0),
+										DstQueueFamilyIndex: ^uint32(0),
+										Image:               resultCanvas.GetImage(),
+										SubresourceRange: vk.ImageSubresourceRange{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											BaseMipLevel:   0,
+											LevelCount:     1,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+									},
+									{
+										SrcAccessMask:       snapshotSrcAccess,
+										DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+										OldLayout:           snapshotOldLayout,
+										NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+										SrcQueueFamilyIndex: ^uint32(0),
+										DstQueueFamilyIndex: ^uint32(0),
+										Image:               snapshots[nextSnapshotSlot].Image,
+										SubresourceRange: vk.ImageSubresourceRange{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											BaseMipLevel:   0,
+											LevelCount:     1,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+									},
+								},
+							)
+
+							// Copy image from result canvas to snapshot
+							cmd.CmdCopyImage(
+								resultCanvas.GetImage(),
+								vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+								snapshots[nextSnapshotSlot].Image,
+								vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								[]vk.ImageCopy{
+									{
+										SrcSubresource: vk.ImageSubresourceLayers{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											MipLevel:       0,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+										SrcOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+										DstSubresource: vk.ImageSubresourceLayers{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											MipLevel:       0,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+										DstOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+										Extent:    vk.Extent3D{Width: resultCanvas.GetWidth(), Height: resultCanvas.GetHeight(), Depth: 1},
+									},
+								},
+							)
+
+							// Transition back
+							cmd.PipelineBarrier(
+								vk.PIPELINE_STAGE_TRANSFER_BIT,
+								vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+								0,
+								[]vk.ImageMemoryBarrier{
+									{
+										SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+										DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+										OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+										NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+										SrcQueueFamilyIndex: ^uint32(0),
+										DstQueueFamilyIndex: ^uint32(0),
+										Image:               resultCanvas.GetImage(),
+										SubresourceRange: vk.ImageSubresourceRange{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											BaseMipLevel:   0,
+											LevelCount:     1,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+									},
+									{
+										SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+										DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+										OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+										NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+										SrcQueueFamilyIndex: ^uint32(0),
+										DstQueueFamilyIndex: ^uint32(0),
+										Image:               snapshots[nextSnapshotSlot].Image,
+										SubresourceRange: vk.ImageSubresourceRange{
+											AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+											BaseMipLevel:   0,
+											LevelCount:     1,
+											BaseArrayLayer: 0,
+											LayerCount:     1,
+										},
+									},
+								},
+							)
+
+							// Mark snapshot as valid
+							snapshots[nextSnapshotSlot].ActionIndex = actionIdx + 1
+							snapshots[nextSnapshotSlot].IsValid = true
+							nextSnapshotSlot = (nextSnapshotSlot + 1) % maxSnapshots
 						}
 
 					case ActionTypeLayerVisibility:
@@ -4627,7 +5134,7 @@ void main() {
 			}
 
 			// === Stroke start: Detect pen down transition ===
-			if penDown && !prevPenDown && penPressure > 0.0 {
+			if penDown && !prevPenDown && penPressure > 0.001 {
 				// Stroke just started
 				strokeActive = true
 				isFirstFrameOfStroke = true // Skip interpolation on first frame
@@ -4639,7 +5146,7 @@ void main() {
 			cXLast, cYLast := float32(0.0), float32(0.0)
 
 			// === PASS 0: Render brush strokes to canvas (if pen is down) ===
-			if penDown && penPressure > 0.0 {
+			if penDown && penPressure > 0.001 {
 				// Get layer2's transform to account for canvas position/scale
 				layer2Transform := world.GetTransform(layer2)
 
@@ -5074,9 +5581,9 @@ void main() {
 				prevPenPressure = penPressure
 			} else {
 				// === Stroke end: Detect pen up transition ===
-				if prevPenDown && !penDown && strokeActive {
+				if ((prevPenDown && !penDown) || penPressure < 0.001) && strokeActive {
 					// Save completed stroke to action history
-					if len(currentStroke) > 0 {
+					if len(currentStroke) > 10 {
 						// Add new stroke to action history
 						// Get current brush color from color picker
 						strokeR, strokeG, strokeB := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
@@ -5087,15 +5594,8 @@ void main() {
 						}
 						actionRecorder.RecordStroke(newStroke)
 
-						// === GPU Snapshot: Take snapshot every N strokes for fast undo ===
-						currentActionIndex := actionRecorder.GetIndex()
-						if currentActionIndex%snapshotInterval == 0 {
-							fmt.Printf("[SNAPSHOT] Saving canvas state at action %d\n", currentActionIndex)
-							// Note: Snapshot implementation will be added here
-							snapshots[nextSnapshotSlot].ActionIndex = currentActionIndex
-							snapshots[nextSnapshotSlot].IsValid = true
-							nextSnapshotSlot = (nextSnapshotSlot + 1) % maxSnapshots
-						}
+						// Note: Snapshots are created during replay, not during normal drawing
+						// (we can't call vkCmdCopyImage outside of command buffer recording)
 
 						// Update layer2's texture to point to the current paintCanvas
 						layer2Texture := world.GetTextureData(layer2)
@@ -5142,7 +5642,14 @@ void main() {
 			prevPenDown = penDown
 
 			// ===  PASS 1: Render each layer to its framebuffer ===
+			// Only render ROOT layers (layers with no parent)
+			// Groups will composite their children to their framebuffer
 			for _, entity := range sortedLayers {
+				// Skip layers that have a parent (they'll be rendered by their group)
+				if !world.IsRootLayer(entity) {
+					continue
+				}
+
 				renderTarget := world.GetRenderTarget(entity)
 				if renderTarget == nil {
 					continue
@@ -5207,7 +5714,120 @@ void main() {
 					TextRenderer:         textRenderer,
 				}
 
-				if entity == uiButtonBaseLayer {
+				if world.IsGroup(entity) {
+					// Render layer group - composite all children to group's framebuffer
+					if frameCounter%60 == 0 {
+						fmt.Printf("[GROUP] Rendering layer group (entity %d)\n", entity)
+					}
+
+					children := world.GetChildren(entity)
+					if children != nil && len(children.ChildEntities) > 0 {
+						// Bind composite pipeline to render children
+						cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, compositePipeline)
+						cmd.BindDescriptorSets(
+							vk.PIPELINE_BIND_POINT_GRAPHICS,
+							compositePipelineLayout,
+							0,
+							[]vk.DescriptorSet{globalBindlessDescriptorSet},
+							nil,
+						)
+
+						cmd.SetViewport(0, []vk.Viewport{{
+							X:        0,
+							Y:        0,
+							Width:    float32(swapExtent.Width),
+							Height:   float32(swapExtent.Height),
+							MinDepth: 0.0,
+							MaxDepth: 1.0,
+						}})
+						cmd.SetScissor(0, []vk.Rect2D{{
+							Offset: vk.Offset2D{X: 0, Y: 0},
+							Extent: swapExtent,
+						}})
+						cmd.BindVertexBuffers(0, []vk.Buffer{vertexBuffer}, []uint64{0})
+						cmd.BindIndexBuffer(indexBuffer, 0, vk.INDEX_TYPE_UINT16)
+
+						// Composite each child to the group's framebuffer
+						for _, childEntity := range children.ChildEntities {
+							childTexture := world.GetTextureData(childEntity)
+							childBlend := world.GetBlendMode(childEntity)
+							childTransform := world.GetTransform(childEntity)
+
+							if childTexture != nil && childBlend != nil && childTransform != nil {
+								if frameCounter%60 == 0 {
+									fmt.Printf("[GROUP] Compositing child %d to group framebuffer\n", childEntity)
+								}
+
+								// Composite the child using its texture index
+								systems.CompositeLayer(
+									&systems.CompositeContext{
+										CommandBuffer:           cmd,
+										CompositePipeline:       compositePipeline,
+										CompositePipelineLayout: compositePipelineLayout,
+										SwapExtent:              swapExtent,
+										BindlessDescriptorSet:   globalBindlessDescriptorSet,
+									},
+									childTexture.TextureIndex,
+									childBlend.Opacity,
+									childTransform.X,
+									childTransform.Y,
+									childTransform.ScaleX,
+									0, 0, 1, // No camera transform for now (TODO: handle properly)
+									false, // Not screen space
+								)
+							}
+						}
+					}
+				} else if entity == layerBg {
+					// Render background layer - solid color full-screen quad
+					if frameCounter%60 == 0 {
+						fmt.Printf("[BACKGROUND] Rendering background layer (entity %d)\n", entity)
+					}
+					cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, uiRectPipeline)
+					cmd.SetViewport(0, []vk.Viewport{{
+						X:        0,
+						Y:        0,
+						Width:    float32(swapExtent.Width),
+						Height:   float32(swapExtent.Height),
+						MinDepth: 0.0,
+						MaxDepth: 1.0,
+					}})
+					cmd.SetScissor(0, []vk.Rect2D{{
+						Offset: vk.Offset2D{X: 0, Y: 0},
+						Extent: swapExtent,
+					}})
+					cmd.BindVertexBuffers(0, []vk.Buffer{brushVertexBuffer}, []uint64{0})
+
+					// Render full-screen background quad
+					type UIRectPushConstants struct {
+						PosX   float32
+						PosY   float32
+						Width  float32
+						Height float32
+						ColorR float32
+						ColorG float32
+						ColorB float32
+						ColorA float32
+					}
+					bgColor := UIRectPushConstants{
+						PosX:   0,
+						PosY:   0,
+						Width:  float32(swapExtent.Width),
+						Height: float32(swapExtent.Height),
+						ColorR: 0.18, // Nice gray background (like Photoshop)
+						ColorG: 0.18,
+						ColorB: 0.18,
+						ColorA: 1.0,
+					}
+					cmd.CmdPushConstants(
+						uiRectPipelineLayout,
+						vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
+						0,
+						32,
+						unsafe.Pointer(&bgColor),
+					)
+					cmd.Draw(6, 1, 0, 0)
+				} else if entity == uiButtonBaseLayer {
 					// Render button base rectangles only (no text)
 					//buttonCount := len(world.QueryUIButtons())
 					if frameCounter%60 == 0 { // Log every 60 frames to avoid spam
@@ -5335,7 +5955,13 @@ void main() {
 			)
 
 			// Composite each layer (push texture index per layer)
+			// Only composite ROOT layers - children are already composited into their parent groups
 			for _, entity := range sortedLayers {
+				// Skip layers that have a parent (they're inside a group)
+				if !world.IsRootLayer(entity) {
+					continue
+				}
+
 				textureData := world.GetTextureData(entity)
 				blendMode := world.GetBlendMode(entity)
 				transform := world.GetTransform(entity)
@@ -5343,6 +5969,18 @@ void main() {
 					// Check if entity is in screen space (ignores camera transforms)
 					screenSpace := world.GetScreenSpace(entity)
 					isScreenSpace := screenSpace != nil && screenSpace.Enabled
+
+					if entity == layerBg {
+						blendMode.Opacity = float32(math.Sin(float64(time.Now().UnixMilli())/1000.0))/2.0 + 0.5
+
+						//fmt.Printf("[BACKGROUND] Compositing background layer (textureIndex=%d, opacity=%.2f)\n",
+						//	textureData.TextureIndex, blendMode.Opacity)
+					}
+
+					if frameCounter%60 == 0 && world.IsGroup(entity) {
+						fmt.Printf("[GROUP COMPOSITE] Entity=%d, TextureIndex=%d, Opacity=%.2f\n",
+							entity, textureData.TextureIndex, blendMode.Opacity)
+					}
 
 					systems.CompositeLayer(
 						compositeCtx,
@@ -5465,7 +6103,7 @@ void main() {
 
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
-			if frameCounter%60 == 0 { // Log every 60 frames
+			if frameCounter%60 == 61 { // Log every 60 frames
 				fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
 				timer = time.Now().UnixMilli()
 			}
