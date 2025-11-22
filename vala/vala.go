@@ -3358,36 +3358,6 @@ void main() {
 			Width:       swapExtent.Width,
 			Height:      swapExtent.Height,
 		})
-		// Create composite descriptor set for layer 2
-		// BINDLESS: 		layer2CompositeSets, err := device.AllocateDescriptorSets(&vk.DescriptorSetAllocateInfo{
-		// BINDLESS: 			DescriptorPool: compositeDescriptorPool,
-		// BINDLESS: 			SetLayouts:     []vk.DescriptorSetLayout{compositeDescriptorSetLayout},
-		// BINDLESS: 		})
-		// BINDLESS: 		if err != nil {
-		// BINDLESS: 			panic(fmt.Sprintf("Failed to allocate layer 2 composite descriptor set: %v", err))
-		// BINDLESS: 		}
-		// BINDLESS: 		layer2CompositeDescSet := layer2CompositeSets[0]
-		// BINDLESS:
-		// BINDLESS: 		// Update descriptor set to bind layer2's framebuffer texture
-		// BINDLESS: 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
-		// BINDLESS: 			{
-		// BINDLESS: 				DstSet:          layer2CompositeDescSet,
-		// BINDLESS: 				DstBinding:      0,
-		// BINDLESS: 				DstArrayElement: 0,
-		// BINDLESS: 				DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		// BINDLESS: 				ImageInfo: []vk.DescriptorImageInfo{
-		// BINDLESS: 					{
-		// BINDLESS: 						Sampler:     layerSampler,
-		// BINDLESS: 						ImageView:   layer2ImageView,
-		// BINDLESS: 						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		// BINDLESS: 					},
-		// BINDLESS: 				},
-		// BINDLESS: 			},
-		// BINDLESS: 		})
-
-		// BINDLESS: 		// Update layer2's VulkanPipeline with composite descriptor set
-		// BINDLESS: 		layer2Pipeline := world.GetVulkanPipeline(layer2)
-		// BINDLESS: 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
 
 		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
 		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
@@ -5503,7 +5473,5 @@ void main() {
 			time.Sleep(1 * time.Millisecond)
 
 		}
-
-		// Wait for device to finish
 	}
 }
