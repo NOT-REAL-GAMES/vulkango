@@ -4101,9 +4101,10 @@ void main() {
 		// loadFrame copies a frame's storage to paintCanvas (creates frame if it doesn't exist)
 		loadFrame := func(frameNum int) {
 			frameTexture := frameTextures[frameNum]
+			isNewFrame := frameTexture == nil // Track if we're creating a new frame
 
 			// Lazy frame creation - create frame if it doesn't exist yet
-			if frameTexture == nil {
+			if isNewFrame {
 				fmt.Printf("Creating new frame %d...\n", frameNum)
 
 				// Calculate mip levels for progressive streaming
@@ -4373,13 +4374,15 @@ void main() {
 			device.DestroyFence(fence)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
-			// RAGE-style progressive streaming: Start at low quality, stream higher quality over time
-			// When loading an existing frame, reset to mip 4 and stream to full quality
-			frameTexture.CurrentMip = 4
-			fmt.Printf("[RAGE] Loaded frame %d at mip 4 (128×128) - streaming to full quality...\n", frameNum)
+			// RAGE-style progressive streaming: Only for existing frames (new frames already started streaming)
+			if !isNewFrame {
+				// When loading an existing frame, reset to mip 4 and stream to full quality
+				frameTexture.CurrentMip = 4
+				fmt.Printf("[RAGE] Loaded existing frame %d at mip 4 (128×128) - streaming to full quality...\n", frameNum)
 
-			// Kick off RAGE-style progressive streaming in background
-			go streamFrameProgressive(frameNum)
+				// Kick off RAGE-style progressive streaming in background
+				go streamFrameProgressive(frameNum)
+			}
 		}
 
 		// Frame switching synchronization
