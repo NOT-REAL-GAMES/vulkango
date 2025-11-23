@@ -129,6 +129,18 @@ func (device Device) CreateImageWithMemory(
 	properties MemoryPropertyFlags,
 	physicalDevice PhysicalDevice,
 ) (Image, DeviceMemory, error) {
+	return device.CreateImageWithMemoryAndMips(width, height, format, tiling, usage, properties, physicalDevice, 1)
+}
+
+func (device Device) CreateImageWithMemoryAndMips(
+	width, height uint32,
+	format Format,
+	tiling ImageTiling,
+	usage ImageUsageFlags,
+	properties MemoryPropertyFlags,
+	physicalDevice PhysicalDevice,
+	mipLevels uint32,
+) (Image, DeviceMemory, error) {
 
 	image, err := device.CreateImage(&ImageCreateInfo{
 		ImageType: IMAGE_TYPE_2D,
@@ -138,7 +150,7 @@ func (device Device) CreateImageWithMemory(
 			Height: height,
 			Depth:  1,
 		},
-		MipLevels:     1,
+		MipLevels:     mipLevels,
 		ArrayLayers:   1,
 		Samples:       SAMPLE_COUNT_1_BIT,
 		Tiling:        tiling,
