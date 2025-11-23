@@ -3947,16 +3947,24 @@ void main() {
 				panic(fmt.Sprintf("Failed to submit: %v", err))
 			}
 
-			// Destroy old fence if it exists, then store new fence
-			// Frame switching will wait for this fence instead of WaitIdle()
+			// CRITICAL: Must wait for save to complete before continuing
+			// Otherwise main render loop will use paintCanvas while GPU is still reading it
+			fmt.Printf("[SAVE] Waiting for fence for frame %d...\n", currentFrame)
+			err = device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			if err != nil {
+				panic(fmt.Sprintf("Failed to wait for fence: %v", err))
+			}
+			fmt.Printf("[SAVE] Fence signaled for frame %d\n", currentFrame)
+
+			// Destroy old fence if it exists, then store new (signaled) fence
+			// Frame switching will wait for this fence (returns immediately since already signaled)
 			if frameTexture.LastFence != (vk.Fence{}) {
 				device.DestroyFence(frameTexture.LastFence)
 			}
 			frameTexture.LastFence = fence
 
-			// Free command buffer (but don't wait for fence - let frame switch wait for it)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
-			fmt.Printf("[SAVE] Frame %d saved (fence stored, not waiting)\n", currentFrame)
+			fmt.Printf("[SAVE] Frame %d saved (fence stored and signaled)\n", currentFrame)
 
 			fmt.Printf("Saved frame %d\n", currentFrame)
 		}
