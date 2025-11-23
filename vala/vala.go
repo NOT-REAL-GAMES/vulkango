@@ -2429,8 +2429,14 @@ void main() {
 			ImageView    vk.ImageView
 			Memory       vk.DeviceMemory
 			TextureIndex uint32
+			MipLevels    uint32 // Number of mip levels in this texture
+
+			// Progressive streaming state (RAGE-style)
+			CurrentMip   int       // Currently loaded mip (4=lowest/fastest, 0=full quality)
+			StreamCancel chan bool // Send signal here to cancel ongoing streaming
 		}
 		frameTextures := make(map[int]*FrameTexture)
+		_ = 0 // streamingFrameNum will be used for progressive streaming (TODO)
 		fmt.Println("Initializing frame storage system...")
 
 		// === GPU Snapshot System for Fast Undo ===
@@ -3745,6 +3751,168 @@ void main() {
 
 		//world.AddTransform(frameCounterText, textTransform)
 
+		// === Helper Functions for Mipmap Generation ===
+		// Calculate number of mip levels for a texture
+		calculateMipLevels := func(width, height uint32) uint32 {
+			levels := uint32(1)
+			for width > 1 || height > 1 {
+				levels++
+				if width > 1 {
+					width /= 2
+				}
+				if height > 1 {
+					height /= 2
+				}
+			}
+			return levels
+		}
+
+		// generateMipmaps - Generate all mip levels for an image using vkCmdBlitImage
+		// This creates the progressive quality levels for RAGE-style streaming
+		generateMipmaps := func(image vk.Image, width, height, mipLevels uint32, cmd vk.CommandBuffer) {
+			// Transition mip 0 to TRANSFER_SRC (we'll blit FROM it)
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Generate each mip level by blitting from previous level
+			mipWidth := width
+			mipHeight := height
+
+			for mip := uint32(1); mip < mipLevels; mip++ {
+				// Calculate dimensions for this mip
+				nextWidth := mipWidth / 2
+				nextHeight := mipHeight / 2
+				if nextWidth == 0 {
+					nextWidth = 1
+				}
+				if nextHeight == 0 {
+					nextHeight = 1
+				}
+
+				// Transition this mip to TRANSFER_DST for writing
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       0,
+						DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               image,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   mip,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				// Blit from previous mip (mip-1) to current mip
+				cmd.CmdBlitImage(
+					image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					[]vk.ImageBlit{{
+						SrcSubresource: vk.ImageSubresourceLayers{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							MipLevel:       mip - 1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+						SrcOffsets: [2]vk.Offset3D{
+							{X: 0, Y: 0, Z: 0},
+							{X: int32(mipWidth), Y: int32(mipHeight), Z: 1},
+						},
+						DstSubresource: vk.ImageSubresourceLayers{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							MipLevel:       mip,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+						DstOffsets: [2]vk.Offset3D{
+							{X: 0, Y: 0, Z: 0},
+							{X: int32(nextWidth), Y: int32(nextHeight), Z: 1},
+						},
+					}},
+					vk.FILTER_LINEAR, // Use linear filtering for smooth downsampling
+				)
+
+				// Transition this mip to TRANSFER_SRC for next iteration
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               image,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   mip,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				mipWidth = nextWidth
+				mipHeight = nextHeight
+			}
+
+			// Transition ALL mips to SHADER_READ_ONLY_OPTIMAL for sampling
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     mipLevels, // All mips!
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			fmt.Printf("[MIPMAPS] Generated %d mip levels (%dx%d → 1x1)\n", mipLevels, width, height)
+		}
+
 		// === Frame Switching Functions ===
 		// saveCurrentFrame copies paintCanvas content to current frame's storage
 		saveCurrentFrame := func() {
@@ -3843,30 +4011,8 @@ void main() {
 				vk.FILTER_NEAREST,
 			)
 
-			// Transition frameTexture back to SHADER_READ_ONLY
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
+			// Transition paintCanvas back to SHADER_READ_ONLY (do this BEFORE generating mipmaps)
 
-			// Transition paintCanvas back to SHADER_READ_ONLY
 			cmd.PipelineBarrier(
 				vk.PIPELINE_STAGE_TRANSFER_BIT,
 				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -3888,6 +4034,10 @@ void main() {
 					},
 				}},
 			)
+
+			// Generate all mip levels for frame texture (RAGE-style progressive streaming)
+			// This will transition frameTexture to SHADER_READ_ONLY_OPTIMAL
+			generateMipmaps(frameTexture.Image, paintCanvas.GetWidth(), paintCanvas.GetHeight(), frameTexture.MipLevels, cmd)
 
 			cmd.End()
 
@@ -3919,6 +4069,35 @@ void main() {
 			fmt.Printf("Saved frame %d\n", currentFrame)
 		}
 
+		// streamFrameProgressive - RAGE-style progressive mipmap streaming
+		// Loads lowest mip first (instant), then streams higher quality over time
+		// Can be cancelled if user switches to different frame
+		streamFrameProgressive := func(frameNum int) {
+			frameTexture := frameTextures[frameNum]
+			if frameTexture == nil || frameTexture.CurrentMip == 0 {
+				return // Nothing to stream (already at full quality)
+			}
+
+			fmt.Printf("[STREAM] Starting progressive streaming for frame %d (mip %d → 0)\n", frameNum, frameTexture.CurrentMip)
+
+			// Stream from current mip down to 0 (full quality)
+			// Each mip takes ~16ms (60fps pacing) to "load"
+			for mip := frameTexture.CurrentMip - 1; mip >= 0; mip-- {
+				select {
+				case <-frameTexture.StreamCancel:
+					fmt.Printf("[STREAM] Cancelled streaming for frame %d at mip %d\n", frameNum, mip)
+					return // User switched away, abort streaming
+
+				case <-time.After(16 * time.Millisecond): // ~60fps pacing
+					// Update to next higher quality mip
+					frameTexture.CurrentMip = mip
+					fmt.Printf("[STREAM] Frame %d → mip %d loaded (quality improving...)\n", frameNum, mip)
+				}
+			}
+
+			fmt.Printf("[STREAM] Frame %d fully loaded at mip 0 (full quality)\n", frameNum)
+		}
+
 		// loadFrame copies a frame's storage to paintCanvas (creates frame if it doesn't exist)
 		loadFrame := func(frameNum int) {
 			frameTexture := frameTextures[frameNum]
@@ -3927,18 +4106,27 @@ void main() {
 			if frameTexture == nil {
 				fmt.Printf("Creating new frame %d...\n", frameNum)
 
-				newImage, newMemory, err := device.CreateImageWithMemory(
-					paintCanvasA.GetWidth(),
-					paintCanvasA.GetHeight(),
+				// Calculate mip levels for progressive streaming
+				width := paintCanvasA.GetWidth()
+				height := paintCanvasA.GetHeight()
+				mipLevels := calculateMipLevels(width, height)
+
+				// Create image WITH mipmaps for progressive streaming
+				newImage, newMemory, err := device.CreateImageWithMemoryAndMips(
+					width,
+					height,
 					vk.FORMAT_R8G8B8A8_UNORM,
 					vk.IMAGE_TILING_OPTIMAL,
 					vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
 					vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 					physicalDevice,
+					mipLevels, // ← CREATE WITH MIPMAPS!
 				)
 				if err != nil {
 					panic(err)
 				}
+
+				fmt.Printf("Created frame %d with %d mip levels (2048→%d)\n", frameNum, mipLevels, 1<<(mipLevels-1))
 
 				newView, err := device.CreateImageViewForTexture(newImage, vk.FORMAT_R8G8B8A8_UNORM)
 				if err != nil {
@@ -3996,27 +4184,9 @@ void main() {
 					}},
 				)
 
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               newImage,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
+				// Generate all mip levels from mip 0 (RAGE-style progressive streaming)
+				// This will transition all mips to SHADER_READ_ONLY_OPTIMAL
+				generateMipmaps(newImage, width, height, mipLevels, cmd)
 
 				cmd.End()
 
@@ -4040,9 +4210,15 @@ void main() {
 					ImageView:    newView,
 					Memory:       newMemory,
 					TextureIndex: newTextureIndex,
+					MipLevels:    mipLevels,
+					CurrentMip:   4, // RAGE-style: Start at mip 4 (128×128), stream to full quality
+					StreamCancel: make(chan bool, 1),
 				}
 				frameTexture = frameTextures[frameNum]
-				fmt.Printf("Frame %d created (texture index %d)\n", frameNum, newTextureIndex)
+				fmt.Printf("[RAGE] Frame %d created at mip 4 (128×128) - streaming to full quality...\n", frameNum)
+
+				// Kick off RAGE-style progressive streaming in background
+				go streamFrameProgressive(frameNum)
 			}
 
 			// Copy frameTexture to paintCanvas
@@ -4197,7 +4373,13 @@ void main() {
 			device.DestroyFence(fence)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
-			fmt.Printf("Loaded frame %d\n", frameNum)
+			// RAGE-style progressive streaming: Start at low quality, stream higher quality over time
+			// When loading an existing frame, reset to mip 4 and stream to full quality
+			frameTexture.CurrentMip = 4
+			fmt.Printf("[RAGE] Loaded frame %d at mip 4 (128×128) - streaming to full quality...\n", frameNum)
+
+			// Kick off RAGE-style progressive streaming in background
+			go streamFrameProgressive(frameNum)
 		}
 
 		// Frame switching synchronization
@@ -4244,6 +4426,17 @@ void main() {
 
 			// Save current frame
 			saveCurrentFrame()
+
+			// RAGE: Cancel streaming for old frame before switching
+			if oldFrameTexture := frameTextures[oldFrame]; oldFrameTexture != nil {
+				// Non-blocking send to cancel channel
+				select {
+				case oldFrameTexture.StreamCancel <- true:
+					fmt.Printf("[RAGE] Cancelled streaming for old frame %d\n", oldFrame)
+				default:
+					// Channel already has a value or streaming finished
+				}
+			}
 
 			// Update timeline
 			timeline.CurrentFrame = newFrame
