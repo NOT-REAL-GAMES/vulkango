@@ -6384,7 +6384,7 @@ void main() {
 				if world.IsGroup(entity) {
 					// Render layer group - composite all children to group's framebuffer
 					if frameCounter%60 == 0 {
-						fmt.Printf("[GROUP] Rendering layer group (entity %d)\n", entity)
+						//fmt.Printf("[GROUP] Rendering layer group (entity %d)\n", entity)
 					}
 
 					children := world.GetChildren(entity)
@@ -6422,7 +6422,7 @@ void main() {
 
 							if childTexture != nil && childBlend != nil && childTransform != nil {
 								if frameCounter%60 == 0 {
-									fmt.Printf("[GROUP] Compositing child %d to group framebuffer\n", childEntity)
+									//fmt.Printf("[GROUP] Compositing child %d to group framebuffer\n", childEntity)
 								}
 
 								// Composite the child using its texture index
@@ -6448,7 +6448,7 @@ void main() {
 				} else if entity == layerBg {
 					// Render background layer - solid color full-screen quad
 					if frameCounter%60 == 0 {
-						fmt.Printf("[BACKGROUND] Rendering background layer (entity %d)\n", entity)
+						//fmt.Printf("[BACKGROUND] Rendering background layer (entity %d)\n", entity)
 					}
 					cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, uiRectPipeline)
 					cmd.SetViewport(0, []vk.Viewport{{
@@ -6646,8 +6646,8 @@ void main() {
 					}
 
 					if frameCounter%60 == 0 && world.IsGroup(entity) {
-						fmt.Printf("[GROUP COMPOSITE] Entity=%d, TextureIndex=%d, Opacity=%.2f\n",
-							entity, textureData.TextureIndex, blendMode.Opacity)
+						//fmt.Printf("[GROUP COMPOSITE] Entity=%d, TextureIndex=%d, Opacity=%.2f\n",
+						//	entity, textureData.TextureIndex, blendMode.Opacity)
 					}
 
 					systems.CompositeLayer(
@@ -6777,7 +6777,7 @@ void main() {
 
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
-			if frameCounter%60 == 61 { // Log every 60 frames
+			if frameCounter%60 == 0 { // Log every 60 frames
 				fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
 				timer = time.Now().UnixMilli()
 			}
