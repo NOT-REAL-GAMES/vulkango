@@ -2524,122 +2524,10 @@ void main() {
 		})
 		fmt.Println("Brush descriptor set updated with source canvas texture")
 
-		// Initialize frame 0 (starting frame)
-		// Frame 0 starts as a copy of the current (blank) paintCanvas
-		fmt.Println("Initializing frame 0...")
-		{
-			frame0Image, frame0Memory, err := device.CreateImageWithMemory(
-				paintCanvasA.GetWidth(),
-				paintCanvasA.GetHeight(),
-				vk.FORMAT_R8G8B8A8_UNORM,
-				vk.IMAGE_TILING_OPTIMAL,
-				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
-				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				physicalDevice,
-			)
-			if err != nil {
-				panic(err)
-			}
+		// Frame 0 will be initialized by loadFrame(0) below with proper RAGE/mipmap support
+		// No need for old pre-initialization
 
-			frame0View, err := device.CreateImageViewForTexture(frame0Image, vk.FORMAT_R8G8B8A8_UNORM)
-			if err != nil {
-				panic(err)
-			}
-
-			frame0TextureIndex := assignNextTextureIndex()
-
-			// Clear frame 0 to transparent
-			{
-				cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-					CommandPool:        commandPool,
-					Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-					CommandBufferCount: 1,
-				})
-				if err != nil {
-					panic(err)
-				}
-				cmd := cmdBufs[0]
-				cmd.Begin(&vk.CommandBufferBeginInfo{
-					Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-				})
-
-				// Transition to TRANSFER_DST
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       0,
-						DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
-						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               frame0Image,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				// Clear to transparent
-				cmd.CmdClearColorImage(
-					frame0Image,
-					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					&vk.ClearColorValue{Float32: [4]float32{0, 0, 0, 0}},
-					[]vk.ImageSubresourceRange{{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					}},
-				)
-
-				// Transition to SHADER_READ_ONLY
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               frame0Image,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				cmd.End()
-				queue.Submit([]vk.SubmitInfo{
-					{CommandBuffers: []vk.CommandBuffer{cmd}},
-				}, vk.Fence{})
-				queue.WaitIdle()
-				device.FreeCommandBuffers(commandPool, cmdBufs)
-			}
-
-			// Store frame 0
-			frameTextures[0] = &FrameTexture{
-				Image:        frame0Image,
-				ImageView:    frame0View,
-				Memory:       frame0Memory,
-				TextureIndex: frame0TextureIndex,
-			}
-			fmt.Printf("Frame 0 initialized (texture index %d)\n", frame0TextureIndex)
-		}
+		fmt.Println("\nCreating texture...")
 
 		fmt.Println("\nCreating texture...")
 
@@ -4220,6 +4108,9 @@ void main() {
 
 				// Kick off RAGE-style progressive streaming in background
 				go streamFrameProgressive(frameNum)
+			} else {
+				// For existing frames, set to mip 4 BEFORE blitting for fast loading
+				frameTexture.CurrentMip = 4
 			}
 
 			// Copy frameTexture to paintCanvas
@@ -4283,19 +4174,37 @@ void main() {
 			)
 
 			// Copy frameTexture to paintCanvas
+			// RAGE: Use current mip level for faster loading (starts at mip 4 = 128×128, then streams to mip 0 = 2048×2048)
+			currentMip := frameTexture.CurrentMip
+			if currentMip > int(frameTexture.MipLevels)-1 {
+				currentMip = int(frameTexture.MipLevels) - 1 // Clamp to available mips
+			}
+
+			// Calculate source dimensions for the current mip level
+			srcWidth := paintCanvas.GetWidth() >> uint32(currentMip)
+			srcHeight := paintCanvas.GetHeight() >> uint32(currentMip)
+			if srcWidth == 0 {
+				srcWidth = 1
+			}
+			if srcHeight == 0 {
+				srcHeight = 1
+			}
+
+			fmt.Printf("[BLIT] Copying frame %d from mip %d (%dx%d) to paintCanvas\n", frameNum, currentMip, srcWidth, srcHeight)
+
 			cmd.CmdBlitImage(
 				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				[]vk.ImageBlit{{
 					SrcSubresource: vk.ImageSubresourceLayers{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       0,
+						MipLevel:       uint32(currentMip), // RAGE: Use current mip instead of always 0!
 						BaseArrayLayer: 0,
 						LayerCount:     1,
 					},
 					SrcOffsets: [2]vk.Offset3D{
 						{X: 0, Y: 0, Z: 0},
-						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
+						{X: int32(srcWidth), Y: int32(srcHeight), Z: 1}, // Source size based on mip
 					},
 					DstSubresource: vk.ImageSubresourceLayers{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
@@ -4376,8 +4285,7 @@ void main() {
 
 			// RAGE-style progressive streaming: Only for existing frames (new frames already started streaming)
 			if !isNewFrame {
-				// When loading an existing frame, reset to mip 4 and stream to full quality
-				frameTexture.CurrentMip = 4
+				// CurrentMip already set to 4 before the blit (for fast loading)
 				fmt.Printf("[RAGE] Loaded existing frame %d at mip 4 (128×128) - streaming to full quality...\n", frameNum)
 
 				// Kick off RAGE-style progressive streaming in background
