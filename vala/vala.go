@@ -3888,10 +3888,20 @@ void main() {
 			)
 
 			cmd.End()
+
+			// Create fence for synchronization
+			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create fence: %v", err))
+			}
+
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, vk.Fence{})
-			queue.WaitIdle()
+			}, fence)
+
+			// Wait for fence, then clean up
+			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			device.DestroyFence(fence)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
 			fmt.Printf("Saved frame %d\n", currentFrame)
@@ -3997,10 +4007,20 @@ void main() {
 				)
 
 				cmd.End()
+
+				// Create fence for synchronization
+				fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+				if err != nil {
+					panic(fmt.Sprintf("Failed to create fence: %v", err))
+				}
+
 				queue.Submit([]vk.SubmitInfo{
 					{CommandBuffers: []vk.CommandBuffer{cmd}},
-				}, vk.Fence{})
-				queue.WaitIdle()
+				}, fence)
+
+				// Wait for fence, then clean up
+				device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+				device.DestroyFence(fence)
 				device.FreeCommandBuffers(commandPool, cmdBufs)
 
 				frameTextures[frameNum] = &FrameTexture{
@@ -4149,10 +4169,20 @@ void main() {
 			)
 
 			cmd.End()
+
+			// Create fence for synchronization
+			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+			if err != nil {
+				panic(fmt.Sprintf("Failed to create fence: %v", err))
+			}
+
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, vk.Fence{})
-			queue.WaitIdle()
+			}, fence)
+
+			// Wait for fence, then clean up
+			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			device.DestroyFence(fence)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
 			fmt.Printf("Loaded frame %d\n", frameNum)
