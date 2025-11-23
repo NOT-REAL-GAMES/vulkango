@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -4198,8 +4199,17 @@ void main() {
 			fmt.Printf("Loaded frame %d\n", frameNum)
 		}
 
+		// Frame switching mutex to prevent overlapping switches (which can crash the GPU driver)
+		var frameSwitchMutex sync.Mutex
+
 		// switchToFrame handles the complete frame switch (save current, load new)
 		switchToFrame := func(newFrame int) {
+			// CRITICAL: Lock to prevent overlapping frame switches
+			// Without this, fast scrubbing can cause multiple simultaneous switches,
+			// leading to GPU driver crashes and system freezes
+			frameSwitchMutex.Lock()
+			defer frameSwitchMutex.Unlock()
+
 			if newFrame < 0 || newFrame >= timeline.TotalFrames {
 				fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
 				return
