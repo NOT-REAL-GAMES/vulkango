@@ -531,6 +531,55 @@ func (cmd CommandBuffer) CmdCopyImage(
 		C.uint32_t(len(cRegions)), &cRegions[0])
 }
 
+// ImageBlit specifies an image blit region (with potential scaling)
+type ImageBlit struct {
+	SrcSubresource ImageSubresourceLayers
+	SrcOffsets     [2]Offset3D // Start and end offsets for source region
+	DstSubresource ImageSubresourceLayers
+	DstOffsets     [2]Offset3D // Start and end offsets for destination region
+}
+
+// CmdBlitImage blits (copies with potential scaling/filtering) between images
+func (cmd CommandBuffer) CmdBlitImage(
+	srcImage Image, srcImageLayout ImageLayout,
+	dstImage Image, dstImageLayout ImageLayout,
+	regions []ImageBlit,
+	filter Filter) {
+
+	cRegions := make([]C.VkImageBlit, len(regions))
+	for i, region := range regions {
+		cRegions[i].srcSubresource.aspectMask = C.VkImageAspectFlags(region.SrcSubresource.AspectMask)
+		cRegions[i].srcSubresource.mipLevel = C.uint32_t(region.SrcSubresource.MipLevel)
+		cRegions[i].srcSubresource.baseArrayLayer = C.uint32_t(region.SrcSubresource.BaseArrayLayer)
+		cRegions[i].srcSubresource.layerCount = C.uint32_t(region.SrcSubresource.LayerCount)
+
+		cRegions[i].srcOffsets[0].x = C.int32_t(region.SrcOffsets[0].X)
+		cRegions[i].srcOffsets[0].y = C.int32_t(region.SrcOffsets[0].Y)
+		cRegions[i].srcOffsets[0].z = C.int32_t(region.SrcOffsets[0].Z)
+		cRegions[i].srcOffsets[1].x = C.int32_t(region.SrcOffsets[1].X)
+		cRegions[i].srcOffsets[1].y = C.int32_t(region.SrcOffsets[1].Y)
+		cRegions[i].srcOffsets[1].z = C.int32_t(region.SrcOffsets[1].Z)
+
+		cRegions[i].dstSubresource.aspectMask = C.VkImageAspectFlags(region.DstSubresource.AspectMask)
+		cRegions[i].dstSubresource.mipLevel = C.uint32_t(region.DstSubresource.MipLevel)
+		cRegions[i].dstSubresource.baseArrayLayer = C.uint32_t(region.DstSubresource.BaseArrayLayer)
+		cRegions[i].dstSubresource.layerCount = C.uint32_t(region.DstSubresource.LayerCount)
+
+		cRegions[i].dstOffsets[0].x = C.int32_t(region.DstOffsets[0].X)
+		cRegions[i].dstOffsets[0].y = C.int32_t(region.DstOffsets[0].Y)
+		cRegions[i].dstOffsets[0].z = C.int32_t(region.DstOffsets[0].Z)
+		cRegions[i].dstOffsets[1].x = C.int32_t(region.DstOffsets[1].X)
+		cRegions[i].dstOffsets[1].y = C.int32_t(region.DstOffsets[1].Y)
+		cRegions[i].dstOffsets[1].z = C.int32_t(region.DstOffsets[1].Z)
+	}
+
+	C.vkCmdBlitImage(cmd.handle,
+		srcImage.handle, C.VkImageLayout(srcImageLayout),
+		dstImage.handle, C.VkImageLayout(dstImageLayout),
+		C.uint32_t(len(cRegions)), &cRegions[0],
+		C.VkFilter(filter))
+}
+
 // Descriptor Set Binding
 func (cmd CommandBuffer) BindDescriptorSets(
 	pipelineBindPoint PipelineBindPoint,

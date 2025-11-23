@@ -147,3 +147,17 @@ func (w *World) QueryScreenSpaceEntities() []Entity {
 
 	return result
 }
+
+// QueryTexts returns all entities that have a Text component with Visible=true.
+func (w *World) QueryTexts() []Entity {
+	result := make([]Entity, 0)
+
+	for entity := range w.entities {
+		text := w.GetText(entity)
+		if text != nil && text.Visible {
+			result = append(result, entity)
+		}
+	}
+
+	return result
+}

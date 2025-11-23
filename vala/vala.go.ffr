@@ -542,9 +542,9 @@ type ImageData struct {
 	Pixels []byte
 }
 
-// Timeline holds animation state for the project
+// Timeline holds the animation state for the project
 type Timeline struct {
-	CurrentFrame int     // The frame currently being displayed/edited (0-based)
+	CurrentFrame int     // The frame currently being displayed/edited
 	TotalFrames  int     // Total number of frames in the animation
 	FPS          float32 // Frames per second for playback
 	IsPlaying    bool    // Whether the animation is currently playing
@@ -932,15 +932,6 @@ func CreateImageLayer(
 	fmt.Printf("Created layer entity %d from %s\n", entity, imagePath)
 	return entity, nil
 }
-
-// === UI Layer Z-Index Constants ===
-// Reserve top 256 Z-indices for UI layers (0x7fff00 to 0x7fffff)
-const (
-	UILayerButtonBase  = 0x7ffffc // Button base rectangles (below text)
-	UILayerButtonOver  = 0x7ffffd // Button base rectangles (below text)
-	UILayerText        = 0x7ffffe // Button text labels
-	UILayerColorPicker = 0x7fffff // Color picker (on top of all UI)
-)
 
 func main() {
 
@@ -2420,16 +2411,612 @@ void main() {
 		paintCanvas := paintCanvasA       // Start with A as current (destination)
 		paintCanvasSource := paintCanvasB // B is source for first frame
 
-		// === Frame-by-Frame Animation Storage ===
-		// Each frame gets its own texture to enable traditional animation workflow
+		// === Frame Storage for Animation ===
+		// Store separate canvas textures for each frame (frame-by-frame animation)
 		type FrameTexture struct {
 			Image        vk.Image
 			ImageView    vk.ImageView
 			Memory       vk.DeviceMemory
-			TextureIndex uint32
+			TextureIndex uint32 // Bindless texture index for this frame
 		}
 		frameTextures := make(map[int]*FrameTexture)
-		fmt.Println("Initializing frame storage system...")
+
+		// Initialize frame 0 with a blank texture
+		fmt.Println("Initializing frame 0 texture...")
+		frame0Image, frame0Memory, err := device.CreateImageWithMemory(
+			paintCanvasA.GetWidth(),
+			paintCanvasA.GetHeight(),
+			vk.FORMAT_R8G8B8A8_UNORM,
+			vk.IMAGE_TILING_OPTIMAL,
+			vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT|vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		frame0View, err := device.CreateImageView(&vk.ImageViewCreateInfo{
+			Image:    frame0Image,
+			ViewType: vk.IMAGE_VIEW_TYPE_2D,
+			Format:   vk.FORMAT_R8G8B8A8_UNORM,
+			SubresourceRange: vk.ImageSubresourceRange{
+				AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+				BaseMipLevel:   0,
+				LevelCount:     1,
+				BaseArrayLayer: 0,
+				LayerCount:     1,
+			},
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		// Assign a texture index for frame 0
+		frame0TextureIndex := assignNextTextureIndex()
+
+		// Create a sampler for frame textures
+		frameSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
+			MagFilter:    vk.FILTER_NEAREST,
+			MinFilter:    vk.FILTER_NEAREST,
+			MipmapMode:   vk.SAMPLER_MIPMAP_MODE_NEAREST,
+			AddressModeU: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeV: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			AddressModeW: vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		// Clear frame 0 to transparent
+		{
+			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+				CommandPool:        *commandPool,
+				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+				CommandBufferCount: 1,
+			})
+			if err != nil {
+				panic(err)
+			}
+			cmd := cmdBufs[0]
+			cmd.Begin(&vk.CommandBufferBeginInfo{
+				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			})
+
+			// Transition to TRANSFER_DST
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       0,
+					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frame0Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Clear to transparent
+			cmd.ClearColorImage(
+				frame0Image,
+				vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				vk.ClearColorValue{Float32: [4]float32{0, 0, 0, 0}},
+				[]vk.ImageSubresourceRange{{
+					AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+					BaseMipLevel:   0,
+					LevelCount:     1,
+					BaseArrayLayer: 0,
+					LayerCount:     1,
+				}},
+			)
+
+			// Transition to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frame0Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			cmd.End()
+			queue.Submit([]vk.SubmitInfo{
+				{CommandBuffers: []vk.CommandBuffer{cmd}},
+			}, vk.Fence{})
+			queue.WaitIdle()
+			device.FreeCommandBuffers(commandPool, cmdBufs)
+		}
+
+		// Store frame 0
+		frameTextures[0] = &FrameTexture{
+			Image:        frame0Image,
+			ImageView:    frame0View,
+			Memory:       frame0Memory,
+			TextureIndex: frame0TextureIndex,
+		}
+
+		// Upload frame 0 texture to bindless descriptor set
+		{
+			binding := frame0TextureIndex / texturesPerBinding
+			arrayElement := frame0TextureIndex % texturesPerBinding
+			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				{
+					DstSet:          globalBindlessDescriptorSet,
+					DstBinding:      binding,
+					DstArrayElement: arrayElement,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					ImageInfo: []vk.DescriptorImageInfo{{
+						Sampler:     frameSampler,
+						ImageView:   frame0View,
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					}},
+				},
+			})
+		}
+		fmt.Printf("Frame 0 initialized with texture index %d\n", frame0TextureIndex)
+
+		// === Frame Switching Functions ===
+		// saveCurrentFrame copies paintCanvas content to the current frame's texture storage
+		saveCurrentFrame := func() {
+			currentFrame := timeline.CurrentFrame
+			frameTexture := frameTextures[currentFrame]
+			if frameTexture == nil {
+				fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
+				return
+			}
+
+			fmt.Printf("Saving frame %d...\n", currentFrame)
+
+			// Copy paintCanvas to frameTexture using a blit operation
+			cmdBufs := device.AllocateCommandBuffers(commandPool, 1)
+			cmd := cmdBufs[0]
+			cmd.Begin(vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+
+			// Transition frameTexture to TRANSFER_DST
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       0,
+					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frameTexture.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Transition paintCanvas to TRANSFER_SRC
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               paintCanvas.GetImage(),
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Copy paintCanvas to frameTexture
+			cmd.BlitImage(
+				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				[]vk.ImageBlit{{
+					SrcSubresource: vk.ImageSubresourceLayers{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						MipLevel:       0,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+					SrcOffsets: [2]vk.Offset3D{
+						{X: 0, Y: 0, Z: 0},
+						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
+					},
+					DstSubresource: vk.ImageSubresourceLayers{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						MipLevel:       0,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+					DstOffsets: [2]vk.Offset3D{
+						{X: 0, Y: 0, Z: 0},
+						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
+					},
+				}},
+				vk.FILTER_NEAREST,
+			)
+
+			// Transition frameTexture back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frameTexture.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Transition paintCanvas back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               paintCanvas.GetImage(),
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			cmd.End()
+			queue.Submit([]vk.SubmitInfo{
+				{CommandBuffers: []vk.CommandBuffer{cmd}},
+			}, vk.Fence{})
+			queue.WaitIdle()
+			device.FreeCommandBuffers(commandPool, cmdBufs)
+
+			fmt.Printf("Frame %d saved successfully\n", currentFrame)
+		}
+
+		// loadFrame copies a frame's texture storage to paintCanvas
+		loadFrame := func(frameNum int) {
+			frameTexture := frameTextures[frameNum]
+			if frameTexture == nil {
+				// Frame doesn't exist yet - create a blank frame
+				fmt.Printf("Frame %d doesn't exist, creating blank frame...\n", frameNum)
+
+				newImage, newMemory, err := device.CreateImageWithMemory(
+					paintCanvasA.GetWidth(),
+					paintCanvasA.GetHeight(),
+					vk.FORMAT_R8G8B8A8_UNORM,
+					vk.IMAGE_TILING_OPTIMAL,
+					vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT|vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+					vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+					physicalDevice,
+				)
+				if err != nil {
+					panic(err)
+				}
+
+				newView, err := device.CreateImageView(newImage, vk.FORMAT_R8G8B8A8_UNORM, vk.IMAGE_ASPECT_COLOR_BIT)
+				if err != nil {
+					panic(err)
+				}
+
+				newTextureIndex := assignNextTextureIndex()
+
+				// Clear to transparent
+				cmdBufs := device.AllocateCommandBuffers(commandPool, 1)
+				cmd := cmdBufs[0]
+				cmd.Begin(vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					0, nil, nil,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       0,
+						DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               newImage,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				cmd.ClearColorImage(
+					newImage,
+					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					vk.ClearColorValue{Float32: [4]float32{0, 0, 0, 0}},
+					[]vk.ImageSubresourceRange{{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					}},
+				)
+
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0, nil, nil,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               newImage,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				cmd.End()
+				queue.Submit([]vk.SubmitInfo{
+					{CommandBuffers: []vk.CommandBuffer{cmd}},
+				}, vk.Fence{})
+				queue.WaitIdle()
+				device.FreeCommandBuffers(commandPool, cmdBufs)
+
+				// Upload to bindless descriptor set
+				binding := newTextureIndex / texturesPerBinding
+				arrayElement := newTextureIndex % texturesPerBinding
+				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					{
+						DstSet:          globalBindlessDescriptorSet,
+						DstBinding:      binding,
+						DstArrayElement: arrayElement,
+						DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						ImageInfo: []vk.DescriptorImageInfo{{
+							Sampler:     canvasSampler,
+							ImageView:   newView,
+							ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						}},
+					},
+				})
+
+				frameTextures[frameNum] = &FrameTexture{
+					Image:        newImage,
+					ImageView:    newView,
+					Memory:       newMemory,
+					TextureIndex: newTextureIndex,
+				}
+
+				frameTexture = frameTextures[frameNum]
+			}
+
+			fmt.Printf("Loading frame %d...\n", frameNum)
+
+			// Copy frameTexture to paintCanvas
+			cmdBufs := device.AllocateCommandBuffers(commandPool, 1)
+			cmd := cmdBufs[0]
+			cmd.Begin(vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+
+			// Transition frameTexture to TRANSFER_SRC
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frameTexture.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Transition paintCanvas to TRANSFER_DST
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       0,
+					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               paintCanvas.GetImage(),
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Copy frameTexture to paintCanvas
+			cmd.BlitImage(
+				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				[]vk.ImageBlit{{
+					SrcSubresource: vk.ImageSubresourceLayers{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						MipLevel:       0,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+					SrcOffsets: [2]vk.Offset3D{
+						{X: 0, Y: 0, Z: 0},
+						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
+					},
+					DstSubresource: vk.ImageSubresourceLayers{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						MipLevel:       0,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+					DstOffsets: [2]vk.Offset3D{
+						{X: 0, Y: 0, Z: 0},
+						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
+					},
+				}},
+				vk.FILTER_NEAREST,
+			)
+
+			// Transition frameTexture back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frameTexture.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Transition paintCanvas back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, nil, nil,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               paintCanvas.GetImage(),
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			cmd.End()
+			queue.Submit([]vk.SubmitInfo{
+				{CommandBuffers: []vk.CommandBuffer{cmd}},
+			}, vk.Fence{})
+			queue.WaitIdle()
+			device.FreeCommandBuffers(commandPool, cmdBufs)
+
+			fmt.Printf("Frame %d loaded successfully\n", frameNum)
+		}
+
+		// switchToFrame changes the current frame (saves current, loads new)
+		switchToFrame := func(newFrame int) {
+			if newFrame < 0 || newFrame >= timeline.TotalFrames {
+				fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
+				return
+			}
+
+			if newFrame == timeline.CurrentFrame {
+				fmt.Printf("Already on frame %d\n", newFrame)
+				return
+			}
+
+			oldFrame := timeline.CurrentFrame
+			fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
+
+			// Save current frame
+			saveCurrentFrame()
+
+			// Update timeline
+			timeline.CurrentFrame = newFrame
+
+			// Load new frame
+			loadFrame(newFrame)
+
+			fmt.Printf("Now on frame %d\n", timeline.CurrentFrame)
+		}
+
+		// Initialize paintCanvas with frame 0's content
+		loadFrame(0)
 
 		// === GPU Snapshot System for Fast Undo ===
 		// Store canvas snapshots every N strokes to avoid replaying from the beginning
@@ -2515,123 +3102,6 @@ void main() {
 			},
 		})
 		fmt.Println("Brush descriptor set updated with source canvas texture")
-
-		// Initialize frame 0 (starting frame)
-		// Frame 0 starts as a copy of the current (blank) paintCanvas
-		fmt.Println("Initializing frame 0...")
-		{
-			frame0Image, frame0Memory, err := device.CreateImageWithMemory(
-				paintCanvasA.GetWidth(),
-				paintCanvasA.GetHeight(),
-				vk.FORMAT_R8G8B8A8_UNORM,
-				vk.IMAGE_TILING_OPTIMAL,
-				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
-				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				physicalDevice,
-			)
-			if err != nil {
-				panic(err)
-			}
-
-			frame0View, err := device.CreateImageViewForTexture(frame0Image, vk.FORMAT_R8G8B8A8_UNORM)
-			if err != nil {
-				panic(err)
-			}
-
-			frame0TextureIndex := assignNextTextureIndex()
-
-			// Clear frame 0 to transparent
-			{
-				cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-					CommandPool:        commandPool,
-					Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-					CommandBufferCount: 1,
-				})
-				if err != nil {
-					panic(err)
-				}
-				cmd := cmdBufs[0]
-				cmd.Begin(&vk.CommandBufferBeginInfo{
-					Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-				})
-
-				// Transition to TRANSFER_DST
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       0,
-						DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
-						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               frame0Image,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				// Clear to transparent
-				cmd.CmdClearColorImage(
-					frame0Image,
-					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					&vk.ClearColorValue{Float32: [4]float32{0, 0, 0, 0}},
-					[]vk.ImageSubresourceRange{{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					}},
-				)
-
-				// Transition to SHADER_READ_ONLY
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               frame0Image,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				cmd.End()
-				queue.Submit([]vk.SubmitInfo{
-					{CommandBuffers: []vk.CommandBuffer{cmd}},
-				}, vk.Fence{})
-				queue.WaitIdle()
-				device.FreeCommandBuffers(commandPool, cmdBufs)
-			}
-
-			// Store frame 0
-			frameTextures[0] = &FrameTexture{
-				Image:        frame0Image,
-				ImageView:    frame0View,
-				Memory:       frame0Memory,
-				TextureIndex: frame0TextureIndex,
-			}
-			fmt.Printf("Frame 0 initialized (texture index %d)\n", frame0TextureIndex)
-		}
 
 		fmt.Println("\nCreating texture...")
 
@@ -3133,7 +3603,7 @@ void main() {
 		fmt.Println("Text rendering pipeline created!")
 
 		// Create vertex/index buffers for text (sized for ~100 characters = 400 vertices, 600 indices)
-		maxTextChars := 1048576
+		maxTextChars := 100
 		textVertexBufferSize := uint64(maxTextChars * 4 * 16) // 4 verts * 16 bytes per vertex
 		textIndexBufferSize := uint64(maxTextChars * 6 * 2)   // 6 indices * 2 bytes per index
 
@@ -3162,70 +3632,46 @@ void main() {
 		defer device.DestroyBuffer(textIndexBuffer)
 		defer device.FreeMemory(textIndexMemory)
 
-		// Create per-frame, per-usage staging buffers (CPU-writable, for uploading data)
-		// 2D array: [bufferSetIndex][frameIndex]
-		// Buffer set 0 = button labels, Buffer set 1 = text entities
-		// This prevents conflicts when multiple render passes use text in same frame
-		numFrames := len(swapImages)
-		numBufferSets := 2 // 0=button labels, 1=text entities
-		textStagingVertexBuffers := make([][]vk.Buffer, numBufferSets)
-		textStagingVertexMemories := make([][]vk.DeviceMemory, numBufferSets)
-		textStagingIndexBuffers := make([][]vk.Buffer, numBufferSets)
-		textStagingIndexMemories := make([][]vk.DeviceMemory, numBufferSets)
-
-		for set := 0; set < numBufferSets; set++ {
-			textStagingVertexBuffers[set] = make([]vk.Buffer, numFrames)
-			textStagingVertexMemories[set] = make([]vk.DeviceMemory, numFrames)
-			textStagingIndexBuffers[set] = make([]vk.Buffer, numFrames)
-			textStagingIndexMemories[set] = make([]vk.DeviceMemory, numFrames)
-
-			for i := 0; i < numFrames; i++ {
-				vertexBuf, vertexMem, err := device.CreateBufferWithMemory(
-					textVertexBufferSize,
-					vk.BUFFER_USAGE_TRANSFER_SRC_BIT|vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
-					vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
-					physicalDevice,
-				)
-				if err != nil {
-					panic(fmt.Sprintf("Failed to create vertex staging buffer set %d, frame %d: %v", set, i, err))
-				}
-				textStagingVertexBuffers[set][i] = vertexBuf
-				textStagingVertexMemories[set][i] = vertexMem
-				defer device.DestroyBuffer(vertexBuf)
-				defer device.FreeMemory(vertexMem)
-
-				indexBuf, indexMem, err := device.CreateBufferWithMemory(
-					textIndexBufferSize,
-					vk.BUFFER_USAGE_TRANSFER_SRC_BIT|vk.BUFFER_USAGE_INDEX_BUFFER_BIT,
-					vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
-					physicalDevice,
-				)
-				if err != nil {
-					panic(fmt.Sprintf("Failed to create index staging buffer set %d, frame %d: %v", set, i, err))
-				}
-				textStagingIndexBuffers[set][i] = indexBuf
-				textStagingIndexMemories[set][i] = indexMem
-				defer device.DestroyBuffer(indexBuf)
-				defer device.FreeMemory(indexMem)
-			}
+		// Create HOST_VISIBLE staging buffers (CPU-writable, for uploading data)
+		textStagingVertexBuffer, textStagingVertexMemory, err := device.CreateBufferWithMemory(
+			textVertexBufferSize,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
 		}
-		fmt.Printf("Created %d buffer sets x %d frames = %d total text staging buffer sets\n", numBufferSets, numFrames, numBufferSets*numFrames)
+		defer device.DestroyBuffer(textStagingVertexBuffer)
+		defer device.FreeMemory(textStagingVertexMemory)
+
+		textStagingIndexBuffer, textStagingIndexMemory, err := device.CreateBufferWithMemory(
+			textIndexBufferSize,
+			vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+			vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			physicalDevice,
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyBuffer(textStagingIndexBuffer)
+		defer device.FreeMemory(textStagingIndexMemory)
 
 		// Create TextRenderer for UI button labels
 		textRenderer := &systems.TextRenderer{
-			Pipeline:              textPipeline,
-			PipelineLayout:        textPipelineLayout,
-			DescriptorSet:         textDescriptorSet,
-			Atlas:                 sdfAtlas,
-			VertexBuffer:          textVertexBuffer,
-			VertexMemory:          textVertexMemory,
-			IndexBuffer:           textIndexBuffer,
-			IndexMemory:           textIndexMemory,
-			StagingVertexBuffers:  textStagingVertexBuffers,
-			StagingVertexMemories: textStagingVertexMemories,
-			StagingIndexBuffers:   textStagingIndexBuffers,
-			StagingIndexMemories:  textStagingIndexMemories,
-			MaxChars:              maxTextChars,
+			Pipeline:            textPipeline,
+			PipelineLayout:      textPipelineLayout,
+			DescriptorSet:       textDescriptorSet,
+			Atlas:               sdfAtlas,
+			VertexBuffer:        textVertexBuffer,
+			VertexMemory:        textVertexMemory,
+			IndexBuffer:         textIndexBuffer,
+			IndexMemory:         textIndexMemory,
+			StagingVertexBuffer: textStagingVertexBuffer,
+			StagingVertexMemory: textStagingVertexMemory,
+			StagingIndexBuffer:  textStagingIndexBuffer,
+			StagingIndexMemory:  textStagingIndexMemory,
+			MaxChars:            maxTextChars,
 		}
 		fmt.Println("TextRenderer initialized for UI labels!")
 
@@ -3299,15 +3745,14 @@ void main() {
 		world := ecs.NewWorld()
 		fmt.Println("\n=== ECS World Created ===")
 
-		// === Animation Timeline ===
+		// === Timeline Setup ===
 		timeline := &Timeline{
 			CurrentFrame: 0,     // Start at frame 0
 			TotalFrames:  120,   // Default to 120 frames (5 seconds at 24fps)
-			FPS:          24.0,  // Traditional animation framerate
+			FPS:          24.0,  // Default to 24 fps (traditional animation framerate)
 			IsPlaying:    false, // Not playing by default
 		}
-		fmt.Printf("Timeline: %d frames at %.0f FPS (current frame: %d)\n",
-			timeline.TotalFrames, timeline.FPS, timeline.CurrentFrame)
+		fmt.Printf("Timeline created: %d frames at %.1f FPS\n", timeline.TotalFrames, timeline.FPS)
 
 		// Create a layer entity for the Djungelskog texture
 		layer1 := world.CreateEntity()
@@ -3525,12 +3970,12 @@ void main() {
 		})
 
 		// Add TextureData component (paint canvas)
-		// Assign bindless texture index for layer2
+		// Layer2 displays the active paintCanvas (so we see live painting)
+		// Frame textures are used for storage when switching frames
 		layer2TextureIndex := assignNextTextureIndex()
-		fmt.Printf("Assigned texture index %d to layer2\n", layer2TextureIndex)
+		fmt.Printf("Assigned texture index %d to layer2 (paint canvas)\n", layer2TextureIndex)
 
-		// Upload texture to global bindless descriptor set
-		// Calculate which binding and array index to use for multi-binding architecture
+		// Upload paintCanvas texture to global bindless descriptor set
 		binding2 := layer2TextureIndex / texturesPerBinding
 		arrayElement2 := layer2TextureIndex % texturesPerBinding
 		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
@@ -3550,12 +3995,13 @@ void main() {
 		world.AddTextureData(layer2, &ecs.TextureData{
 			Image:        paintCanvas.GetImage(),
 			ImageView:    paintCanvas.GetView(),
-			ImageMemory:  vk.DeviceMemory{}, // Canvas manages its own memory,
+			ImageMemory:  vk.DeviceMemory{}, // Canvas manages its own memory
 			Sampler:      canvasSampler,
 			Width:        paintCanvas.GetWidth(),
 			Height:       paintCanvas.GetHeight(),
 			TextureIndex: layer2TextureIndex, // Bindless texture array index
 		})
+		fmt.Printf("Layer2 displays paintCanvas (live painting visible)\n")
 
 		// Add BlendMode component with different opacity
 		blendMode2 := ecs.NewBlendMode()
@@ -3720,481 +4166,12 @@ void main() {
 		fmt.Printf("Test group children: %v\n", children.ChildEntities)
 		fmt.Printf("Bear's parent: %d (should be %d)\n", parent.ParentEntity, testGroup)
 
-		// Create "Hello World!" text entity (pen pressure indicator)
+		// Create "Hello World!" text entity
 		helloText := world.CreateEntity()
 		textComponent := ecs.NewText("Hello World!", 100.0, 100.0, 32.0)
 		textComponent.Color = [4]float32{1.0, 1.0, 1.0, 1.0} // White
 		world.AddText(helloText, textComponent)
-		fmt.Println("Created Hello World text entity (screen-space)")
-
-		textTransform := ecs.NewTransform()
-		textTransform.ZIndex = UILayerText // lmao
-		world.AddTransform(helloText, textTransform)
-		world.SetScreenSpace(helloText, false) // Make screen-space so it stays fixed
-
-		// Create frame counter text entity (top-right corner)
-		frameCounterText := world.CreateEntity()
-		frameText := fmt.Sprintf("Frame: %d/%d", timeline.CurrentFrame, timeline.TotalFrames-1)
-		frameComponent := ecs.NewText(frameText, float32(swapExtent.Width)-200.0, 20.0, 24.0)
-		frameComponent.Color = [4]float32{0.2, 1.0, 0.2, 1.0} // Green
-		world.AddText(frameCounterText, frameComponent)
-		world.SetScreenSpace(frameCounterText, true) // Make screen-space so it stays fixed
-		fmt.Println("Created frame counter text entity (screen-space)")
-
-		//world.AddTransform(frameCounterText, textTransform)
-
-		// === Frame Switching Functions ===
-		// saveCurrentFrame copies paintCanvas content to current frame's storage
-		saveCurrentFrame := func() {
-			currentFrame := timeline.CurrentFrame
-			frameTexture := frameTextures[currentFrame]
-			if frameTexture == nil {
-				fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
-				return
-			}
-
-			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-				CommandPool:        commandPool,
-				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-				CommandBufferCount: 1,
-			})
-			if err != nil {
-				panic(err)
-			}
-			cmd := cmdBufs[0]
-			cmd.Begin(&vk.CommandBufferBeginInfo{
-				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-			})
-
-			// Transition frameTexture to TRANSFER_DST
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Transition paintCanvas to TRANSFER_SRC
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               paintCanvas.GetImage(),
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Copy paintCanvas to frameTexture using blit
-			cmd.CmdBlitImage(
-				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				[]vk.ImageBlit{{
-					SrcSubresource: vk.ImageSubresourceLayers{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       0,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-					SrcOffsets: [2]vk.Offset3D{
-						{X: 0, Y: 0, Z: 0},
-						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
-					},
-					DstSubresource: vk.ImageSubresourceLayers{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       0,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-					DstOffsets: [2]vk.Offset3D{
-						{X: 0, Y: 0, Z: 0},
-						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
-					},
-				}},
-				vk.FILTER_NEAREST,
-			)
-
-			// Transition frameTexture back to SHADER_READ_ONLY
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Transition paintCanvas back to SHADER_READ_ONLY
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
-					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               paintCanvas.GetImage(),
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			cmd.End()
-			queue.Submit([]vk.SubmitInfo{
-				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, vk.Fence{})
-			queue.WaitIdle()
-			device.FreeCommandBuffers(commandPool, cmdBufs)
-
-			fmt.Printf("Saved frame %d\n", currentFrame)
-		}
-
-		// loadFrame copies a frame's storage to paintCanvas (creates frame if it doesn't exist)
-		loadFrame := func(frameNum int) {
-			frameTexture := frameTextures[frameNum]
-
-			// Lazy frame creation - create frame if it doesn't exist yet
-			if frameTexture == nil {
-				fmt.Printf("Creating new frame %d...\n", frameNum)
-
-				newImage, newMemory, err := device.CreateImageWithMemory(
-					paintCanvasA.GetWidth(),
-					paintCanvasA.GetHeight(),
-					vk.FORMAT_R8G8B8A8_UNORM,
-					vk.IMAGE_TILING_OPTIMAL,
-					vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
-					vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-					physicalDevice,
-				)
-				if err != nil {
-					panic(err)
-				}
-
-				newView, err := device.CreateImageViewForTexture(newImage, vk.FORMAT_R8G8B8A8_UNORM)
-				if err != nil {
-					panic(err)
-				}
-
-				newTextureIndex := assignNextTextureIndex()
-
-				// Clear new frame to transparent
-				cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-					CommandPool:        commandPool,
-					Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-					CommandBufferCount: 1,
-				})
-				if err != nil {
-					panic(err)
-				}
-				cmd := cmdBufs[0]
-				cmd.Begin(&vk.CommandBufferBeginInfo{
-					Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-				})
-
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       0,
-						DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
-						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               newImage,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				cmd.CmdClearColorImage(
-					newImage,
-					vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					&vk.ClearColorValue{Float32: [4]float32{0, 0, 0, 0}},
-					[]vk.ImageSubresourceRange{{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					}},
-				)
-
-				cmd.PipelineBarrier(
-					vk.PIPELINE_STAGE_TRANSFER_BIT,
-					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					0,
-					[]vk.ImageMemoryBarrier{{
-						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						SrcQueueFamilyIndex: ^uint32(0),
-						DstQueueFamilyIndex: ^uint32(0),
-						Image:               newImage,
-						SubresourceRange: vk.ImageSubresourceRange{
-							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-							BaseMipLevel:   0,
-							LevelCount:     1,
-							BaseArrayLayer: 0,
-							LayerCount:     1,
-						},
-					}},
-				)
-
-				cmd.End()
-				queue.Submit([]vk.SubmitInfo{
-					{CommandBuffers: []vk.CommandBuffer{cmd}},
-				}, vk.Fence{})
-				queue.WaitIdle()
-				device.FreeCommandBuffers(commandPool, cmdBufs)
-
-				frameTextures[frameNum] = &FrameTexture{
-					Image:        newImage,
-					ImageView:    newView,
-					Memory:       newMemory,
-					TextureIndex: newTextureIndex,
-				}
-				frameTexture = frameTextures[frameNum]
-				fmt.Printf("Frame %d created (texture index %d)\n", frameNum, newTextureIndex)
-			}
-
-			// Copy frameTexture to paintCanvas
-			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-				CommandPool:        commandPool,
-				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-				CommandBufferCount: 1,
-			})
-			if err != nil {
-				panic(err)
-			}
-			cmd := cmdBufs[0]
-			cmd.Begin(&vk.CommandBufferBeginInfo{
-				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-			})
-
-			// Transition frameTexture to TRANSFER_SRC
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Transition paintCanvas to TRANSFER_DST
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       0,
-					DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               paintCanvas.GetImage(),
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Copy frameTexture to paintCanvas
-			cmd.CmdBlitImage(
-				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				[]vk.ImageBlit{{
-					SrcSubresource: vk.ImageSubresourceLayers{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       0,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-					SrcOffsets: [2]vk.Offset3D{
-						{X: 0, Y: 0, Z: 0},
-						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
-					},
-					DstSubresource: vk.ImageSubresourceLayers{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       0,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-					DstOffsets: [2]vk.Offset3D{
-						{X: 0, Y: 0, Z: 0},
-						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
-					},
-				}},
-				vk.FILTER_NEAREST,
-			)
-
-			// Transition frameTexture back to SHADER_READ_ONLY
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
-					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			// Transition paintCanvas back to SHADER_READ_ONLY
-			cmd.PipelineBarrier(
-				vk.PIPELINE_STAGE_TRANSFER_BIT,
-				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-				0,
-				[]vk.ImageMemoryBarrier{{
-					SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
-					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
-					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					SrcQueueFamilyIndex: ^uint32(0),
-					DstQueueFamilyIndex: ^uint32(0),
-					Image:               paintCanvas.GetImage(),
-					SubresourceRange: vk.ImageSubresourceRange{
-						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						BaseMipLevel:   0,
-						LevelCount:     1,
-						BaseArrayLayer: 0,
-						LayerCount:     1,
-					},
-				}},
-			)
-
-			cmd.End()
-			queue.Submit([]vk.SubmitInfo{
-				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, vk.Fence{})
-			queue.WaitIdle()
-			device.FreeCommandBuffers(commandPool, cmdBufs)
-
-			fmt.Printf("Loaded frame %d\n", frameNum)
-		}
-
-		// switchToFrame handles the complete frame switch (save current, load new)
-		switchToFrame := func(newFrame int) {
-			if newFrame < 0 || newFrame >= timeline.TotalFrames {
-				fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
-				return
-			}
-
-			if newFrame == timeline.CurrentFrame {
-				return // Already on this frame
-			}
-
-			oldFrame := timeline.CurrentFrame
-			fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
-
-			// CRITICAL: Wait for GPU to finish all pending work before switching frames
-			// This prevents crashes when scrubbing through frames quickly
-			device.WaitForFences(inFlightFences, true, ^uint64(0))
-
-			// Save current frame
-			saveCurrentFrame()
-
-			// Update timeline
-			timeline.CurrentFrame = newFrame
-
-			// Load new frame
-			loadFrame(newFrame)
-
-			// Update frame counter text
-			frameComp := world.GetText(frameCounterText)
-			if frameComp != nil {
-				frameComp.Content = fmt.Sprintf("Frame: %d/%d", timeline.CurrentFrame, timeline.TotalFrames-1)
-			}
-		}
-
-		// Initialize paintCanvas with frame 0's content
-		loadFrame(0)
-		fmt.Println("Paint canvas initialized with frame 0")
+		fmt.Println("Created Hello World text entity")
 
 		// === Action-based Undo System ===
 		// Unified undo/redo for strokes and layer operations
@@ -4282,6 +4259,14 @@ void main() {
 		screenSpace.Enabled = true
 
 		world.AddScreenSpace(testButton, screenSpace)
+
+		// === UI Layer Z-Index Constants ===
+		// Reserve top 256 Z-indices for UI layers (0x7fff00 to 0x7fffff)
+		const (
+			UILayerButtonBase  = 0x7ffffd // Button base rectangles (below text)
+			UILayerButtonText  = 0x7ffffe // Button text labels
+			UILayerColorPicker = 0x7fffff // Color picker (on top of all UI)
+		)
 
 		// Helper function to create a UI layer
 		createUILayer := func(name string, zindex int) (ecs.Entity, vk.Image, vk.ImageView, vk.DeviceMemory) {
@@ -4388,15 +4373,10 @@ void main() {
 		defer device.FreeMemory(uiButtonBaseMem)
 
 		// Create button text layer (renders button labels)
-		uiButtonTextLayer, uiButtonTextImage, uiButtonTextView, uiButtonTextMem := createUILayer("ButtonText", UILayerButtonOver)
+		uiButtonTextLayer, uiButtonTextImage, uiButtonTextView, uiButtonTextMem := createUILayer("ButtonText", UILayerButtonText)
 		defer device.DestroyImage(uiButtonTextImage)
 		defer device.DestroyImageView(uiButtonTextView)
 		defer device.FreeMemory(uiButtonTextMem)
-
-		uiTextLayer, uiTextImage, uiTextView, uiTextMem := createUILayer("Text", UILayerText)
-		defer device.DestroyImage(uiTextImage)
-		defer device.DestroyImageView(uiTextView)
-		defer device.FreeMemory(uiTextMem)
 
 		// Create color picker layer (renders color picker UI)
 		colorPickerLayer, colorPickerImage, colorPickerView, colorPickerMem := createUILayer("ColorPicker", UILayerColorPicker)
@@ -4404,7 +4384,6 @@ void main() {
 		defer device.DestroyImageView(colorPickerView)
 		defer device.FreeMemory(colorPickerMem)
 
-		world.MakeScreenSpace(uiTextLayer, true)
 		world.MakeScreenSpace(uiButtonBaseLayer, true)
 		world.MakeScreenSpace(uiButtonTextLayer, true)
 		world.MakeScreenSpace(colorPickerLayer, true)
@@ -4774,27 +4753,6 @@ void main() {
 								fmt.Println("Color picker shown (press C to hide)")
 							} else {
 								fmt.Println("Color picker hidden")
-							}
-						}
-
-						// Comma (,) - Previous frame
-						if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_COMMA {
-							if timeline.CurrentFrame > 0 {
-								switchToFrame(timeline.CurrentFrame - 1)
-								sdl.Delay(10)
-
-							} else {
-								fmt.Println("Already at first frame")
-							}
-						}
-
-						// Period (.) - Next frame
-						if !ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_PERIOD {
-							if timeline.CurrentFrame < timeline.TotalFrames-1 {
-								switchToFrame(timeline.CurrentFrame + 1)
-								sdl.Delay(10)
-							} else {
-								fmt.Println("Already at last frame")
 							}
 						}
 
@@ -6503,8 +6461,7 @@ void main() {
 					systems.RenderUIButtonBases(world, uiCtx)
 				} else if entity == uiButtonTextLayer {
 					// Render button text labels only (no rectangles)
-					// Pass imageIndex to use the correct per-frame staging buffers
-					systems.RenderUIButtonLabels(world, uiCtx, int(imageIndex))
+					systems.RenderUIButtonLabels(world, uiCtx)
 				} else if entity == colorPickerLayer {
 					// Render color picker if visible
 					if colorPicker.Visible {
@@ -6714,12 +6671,6 @@ void main() {
 			uiButtonJustPressed := uiButtonDown && !uiButtonDownPrev
 
 			systems.UpdateUIButtons(world, uiX, uiY, uiButtonDown, uiButtonJustPressed, cameraX, cameraY, cameraZoom, swapExtent.Width, swapExtent.Height)
-
-			// Render all text entities (frame counter, debug text, etc.)
-			// Use buffer set 1 for text entities (buffer set 0 is for button labels)
-			// Render ONLY text entities (not button labels, those are on button text layer)
-			const bufferSetTextEntities = 1
-			systems.RenderText(world, textRenderer, cmd, swapExtent.Width, swapExtent.Height, device, bufferSetTextEntities, int(imageIndex), true, false)
 
 			cmd.EndRendering()
 

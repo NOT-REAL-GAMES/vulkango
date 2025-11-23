@@ -6,7 +6,6 @@ import (
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/canvas"
 	"github.com/NOT-REAL-GAMES/vulkango/vala/ecs"
-	"github.com/NOT-REAL-GAMES/vulkango/vala/font"
 )
 
 // UIRenderContext holds rendering resources needed by the UI system.
@@ -93,10 +92,12 @@ func UpdateUIButtons(world *ecs.World, mouseX, mouseY float32, mouseButtonDown b
 // RenderUIButtons renders all UI buttons to the command buffer.
 // This uses the UI rectangle pipeline to draw colored rectangles for buttons.
 // DEPRECATED: Use RenderUIButtonBases and RenderUIButtonLabels separately for multi-layer rendering.
-func RenderUIButtons(world *ecs.World, ctx *UIRenderContext, c canvas.Canvas) {
+// frameIndex specifies which staging buffer set to use (0 to len(swapImages)-1).
+func RenderUIButtons(world *ecs.World, ctx *UIRenderContext, c canvas.Canvas, frameIndex int) {
 	RenderUIButtonBases(world, ctx)
 	if ctx.TextRenderer != nil {
-		RenderUIButtonLabels(world, ctx)
+		// Render button labels via RenderText
+		RenderUIButtonLabels(world, ctx, frameIndex)
 	}
 }
 
@@ -198,203 +199,14 @@ func RenderUIButtonBases(world *ecs.World, ctx *UIRenderContext) {
 
 // RenderUIButtonLabels renders only the button text labels (no rectangles).
 // This should be called on the button text layer (above the base layer).
-func RenderUIButtonLabels(world *ecs.World, ctx *UIRenderContext) {
-	renderButtonLabels(world, ctx)
+// frameIndex specifies which staging buffer set to use (0 to len(swapImages)-1).
+// NOTE: This calls RenderText with bufferSetIndex=0 for button labels
+func RenderUIButtonLabels(world *ecs.World, ctx *UIRenderContext, frameIndex int) {
+	// Render only button labels using buffer set 0 (dedicated to button labels)
+	const bufferSetButton = 0
+	RenderText(world, ctx.TextRenderer, ctx.CommandBuffer, ctx.SwapExtent.Width, ctx.SwapExtent.Height, ctx.Device, bufferSetButton, frameIndex, false, true)
 }
 
-// renderButtonLabels renders text labels on buttons
-func renderButtonLabels(world *ecs.World, ctx *UIRenderContext) {
-	buttons := world.QueryUIButtons()
-	fontSize := float32(24.0)
+// renderButtonLabels is DEPRECATED - removed in favor of RenderText with buffer set index
+// All text rendering now goes through RenderText() to avoid buffer conflicts
 
-	// First pass: Collect all text quads for all buttons
-	type buttonTextData struct {
-		vertices []TextVertex
-		indices  []uint16
-		color    [4]float32
-	}
-	textData := make([]buttonTextData, 0, len(buttons))
-	totalVertices := 0
-	totalIndices := 0
-
-	for _, entity := range buttons {
-		button := world.GetUIButton(entity)
-
-		if button.Label == "" || !button.Enabled {
-			continue
-		}
-
-		// Calculate text metrics to center it on the button
-		textWidth := measureText(button.Label, ctx.TextRenderer.Atlas, fontSize)
-		textX := button.X + (button.Width-textWidth)/2
-		textY := button.Y + (button.Height-fontSize)/2 + fontSize*0.7
-
-		// Select label color based on button state
-		var labelColor [4]float32
-		switch button.State {
-		case ecs.UIButtonPressed:
-			labelColor = button.LabelPressed
-		case ecs.UIButtonHovered:
-			labelColor = button.LabelHovered
-		default:
-			labelColor = button.LabelColor
-		}
-
-		textComponent := &ecs.Text{
-			Content:  button.Label,
-			X:        textX,
-			Y:        textY,
-			FontSize: fontSize,
-			Color:    labelColor,
-		}
-
-		vertices, indices := GenerateTextQuads(textComponent, ctx.TextRenderer.Atlas)
-
-		if len(vertices) == 0 {
-			continue
-		}
-
-		// Adjust indices for accumulated vertex offset
-		adjustedIndices := make([]uint16, len(indices))
-		for i, idx := range indices {
-			adjustedIndices[i] = idx + uint16(totalVertices)
-		}
-
-		textData = append(textData, buttonTextData{
-			vertices: vertices,
-			indices:  adjustedIndices,
-			color:    textComponent.Color,
-		})
-
-		totalVertices += len(vertices)
-		totalIndices += len(adjustedIndices)
-	}
-
-	if len(textData) == 0 {
-		return // No text to render
-	}
-
-	// Calculate buffer sizes
-	vertexBufferSize := uint64(totalVertices * int(unsafe.Sizeof(TextVertex{})))
-	indexBufferSize := uint64(totalIndices * 2) // uint16 = 2 bytes
-
-	// Map staging buffers (CPU-writable)
-	vertexPtr, err := ctx.Device.MapMemory(ctx.TextRenderer.StagingVertexMemory, 0, vertexBufferSize)
-	if err != nil {
-		panic(err)
-	}
-	indexPtr, err := ctx.Device.MapMemory(ctx.TextRenderer.StagingIndexMemory, 0, indexBufferSize)
-	if err != nil {
-		panic(err)
-	}
-
-	// Copy all vertex and index data to staging buffers
-	vertexOffset := 0
-	indexOffset := 0
-	for _, data := range textData {
-		// Copy vertices
-		vertexSize := len(data.vertices) * int(unsafe.Sizeof(TextVertex{}))
-		copy(unsafe.Slice((*TextVertex)(vertexPtr), totalVertices)[vertexOffset/int(unsafe.Sizeof(TextVertex{})):], data.vertices)
-		vertexOffset += vertexSize
-
-		// Copy indices
-		indexSize := len(data.indices) * 2 // uint16 = 2 bytes
-		copy(unsafe.Slice((*uint16)(indexPtr), totalIndices)[indexOffset/2:], data.indices)
-		indexOffset += indexSize
-	}
-
-	// Unmap staging buffers
-	ctx.Device.UnmapMemory(ctx.TextRenderer.StagingVertexMemory)
-	ctx.Device.UnmapMemory(ctx.TextRenderer.StagingIndexMemory)
-
-	// Copy from staging buffers to main buffers (this IS allowed during rendering!)
-	vertexDataSize := uint64(totalVertices * int(unsafe.Sizeof(TextVertex{})))
-	indexDataSize := uint64(totalIndices * 2)
-
-	ctx.CommandBuffer.CmdCopyBuffer(
-		ctx.TextRenderer.StagingVertexBuffer,
-		ctx.TextRenderer.VertexBuffer,
-		[]vk.BufferCopy{{
-			SrcOffset: 0,
-			DstOffset: 0,
-			Size:      vertexDataSize,
-		}},
-	)
-
-	ctx.CommandBuffer.CmdCopyBuffer(
-		ctx.TextRenderer.StagingIndexBuffer,
-		ctx.TextRenderer.IndexBuffer,
-		[]vk.BufferCopy{{
-			SrcOffset: 0,
-			DstOffset: 0,
-			Size:      indexDataSize,
-		}},
-	)
-
-	// Bind text pipeline
-	ctx.CommandBuffer.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, ctx.TextRenderer.Pipeline)
-
-	// Bind descriptor set (SDF atlas texture)
-	ctx.CommandBuffer.BindDescriptorSets(
-		vk.PIPELINE_BIND_POINT_GRAPHICS,
-		ctx.TextRenderer.PipelineLayout,
-		0,
-		[]vk.DescriptorSet{ctx.TextRenderer.DescriptorSet},
-		nil,
-	)
-
-	// Bind text vertex and index buffers
-	ctx.CommandBuffer.BindVertexBuffers(0, []vk.Buffer{ctx.TextRenderer.VertexBuffer}, []uint64{0})
-	ctx.CommandBuffer.BindIndexBuffer(ctx.TextRenderer.IndexBuffer, 0, vk.INDEX_TYPE_UINT16)
-
-	// Render all text with individual push constants for each button
-	indexStart := 0
-	for _, data := range textData {
-		// Push constants for text rendering
-		type TextPushConstants struct {
-			ScreenWidth  float32
-			ScreenHeight float32
-			_            [2]float32 // Padding to align vec4 to 16-byte boundary
-			ColorR       float32
-			ColorG       float32
-			ColorB       float32
-			ColorA       float32
-		}
-
-		pushData := TextPushConstants{
-			ScreenWidth:  float32(ctx.SwapExtent.Width),
-			ScreenHeight: float32(ctx.SwapExtent.Height),
-			ColorR:       data.color[0],
-			ColorG:       data.color[1],
-			ColorB:       data.color[2],
-			ColorA:       data.color[3],
-		}
-
-		ctx.CommandBuffer.CmdPushConstants(
-			ctx.TextRenderer.PipelineLayout,
-			vk.SHADER_STAGE_VERTEX_BIT|vk.SHADER_STAGE_FRAGMENT_BIT,
-			0,
-			32, // 8 floats * 4 bytes = 32 bytes (was 24, now includes padding)
-			unsafe.Pointer(&pushData),
-		)
-
-		ctx.CommandBuffer.DrawIndexed(uint32(len(data.indices)), 1, uint32(indexStart), 0, 0)
-		indexStart += len(data.indices)
-	}
-}
-
-// measureText calculates the width of a text string in pixels
-func measureText(text string, atlas *font.SDFAtlas, fontSize float32) float32 {
-	scale := fontSize / atlas.FontSize
-	width := float32(0)
-
-	for _, char := range text {
-		charData, exists := atlas.Chars[char]
-		if !exists {
-			continue
-		}
-		width += float32(charData.XAdvance) * scale
-	}
-
-	return width
-}
