@@ -4085,9 +4085,30 @@ void main() {
 					}},
 				)
 
-				// Generate all mip levels from mip 0 (RAGE-style progressive streaming)
-				// This will transition all mips to SHADER_READ_ONLY_OPTIMAL
-				generateMipmaps(newImage, width, height, mipLevels, cmd)
+				// Skip mipmap generation for blank frames - huge speed win on Windows!
+				// Mipmaps will be generated when frame is saved (has content)
+				// Just transition to SHADER_READ_ONLY for now
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               newImage,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1, // Only mip 0 is initialized
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
 
 				cmd.End()
 
