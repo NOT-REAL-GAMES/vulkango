@@ -4214,7 +4214,13 @@ void main() {
 
 			// CRITICAL: Wait for GPU to finish all pending work before switching frames
 			// This prevents crashes when scrubbing through frames quickly
-			device.WaitForFences(inFlightFences, true, ^uint64(0))
+			// Use device.WaitIdle() instead of WaitForFences to avoid waiting for unsignaled fences
+			fmt.Println("[SWITCH] Waiting for device idle...")
+			err := device.WaitIdle()
+			if err != nil {
+				panic(fmt.Sprintf("WaitIdle failed: %v", err))
+			}
+			fmt.Println("[SWITCH] Device idle complete")
 
 			// Save current frame
 			saveCurrentFrame()

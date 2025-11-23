@@ -223,6 +223,14 @@ func (device Device) Destroy() {
 	C.vkDestroyDevice(device.handle, nil)
 }
 
+func (device Device) WaitIdle() error {
+	result := C.vkDeviceWaitIdle(device.handle)
+	if result != C.VK_SUCCESS {
+		return Result(result)
+	}
+	return nil
+}
+
 func (device Device) GetQueue(queueFamilyIndex, queueIndex uint32) Queue {
 	var queue C.VkQueue
 	C.vkGetDeviceQueue(device.handle, C.uint32_t(queueFamilyIndex), C.uint32_t(queueIndex), &queue)
