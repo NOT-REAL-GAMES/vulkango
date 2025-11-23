@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sync/semaphore"
 
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
@@ -4199,16 +4200,24 @@ void main() {
 			fmt.Printf("Loaded frame %d\n", frameNum)
 		}
 
-		// Frame switching mutex to prevent overlapping switches (which can crash the GPU driver)
-		var frameSwitchMutex sync.Mutex
+		// Frame switching synchronization
+		var frameSwitchInProgress bool
+		frameSwitchSem := semaphore.NewWeighted(1) // Weight of 1 = only one switch at a time
 
 		// switchToFrame handles the complete frame switch (save current, load new)
 		switchToFrame := func(newFrame int) {
-			// CRITICAL: Lock to prevent overlapping frame switches
-			// Without this, fast scrubbing can cause multiple simultaneous switches,
-			// leading to GPU driver crashes and system freezes
-			frameSwitchMutex.Lock()
-			defer frameSwitchMutex.Unlock()
+			// CRITICAL: Use TryAcquire to prevent overlapping frame switches
+			// If a switch is already in progress, skip this request instead of queuing
+			// This prevents GPU driver crashes from simultaneous switches
+			if !frameSwitchSem.TryAcquire(1) {
+				fmt.Printf("[SWITCH] Frame switch already in progress, skipping request for frame %d\n", newFrame)
+				return
+			}
+			defer frameSwitchSem.Release(1)
+
+			// Set flag to pause render loop
+			frameSwitchInProgress = true
+			defer func() { frameSwitchInProgress = false }()
 
 			if newFrame < 0 || newFrame >= timeline.TotalFrames {
 				fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
@@ -4226,6 +4235,7 @@ void main() {
 			// This prevents crashes when scrubbing through frames quickly
 			// Use device.WaitIdle() instead of WaitForFences to avoid waiting for unsignaled fences
 			fmt.Println("[SWITCH] Waiting for device idle...")
+			time.Sleep(1 * time.Millisecond)
 			err := device.WaitIdle()
 			if err != nil {
 				panic(fmt.Sprintf("WaitIdle failed: %v", err))
@@ -4902,6 +4912,13 @@ void main() {
 		}()
 
 		for running {
+			// CRITICAL: Skip rendering if frame switch is in progress
+			// This prevents segfaults when frame switching modifies resources while rendering
+			if frameSwitchInProgress {
+				time.Sleep(1 * time.Millisecond)
+				continue
+			}
+
 			go func() {
 				if !running {
 					return
@@ -6838,7 +6855,7 @@ void main() {
 				timer = time.Now().UnixMilli()
 			}
 
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(500 * time.Microsecond) // suptid pogrommer >:(
 
 		}
 	}

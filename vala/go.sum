@@ -4,3 +4,5 @@ github.com/NOT-REAL-GAMES/vulkango v0.0.0-20251114171301-349a5bdc3ea0 h1:PKLjQhX
 github.com/NOT-REAL-GAMES/vulkango v0.0.0-20251114171301-349a5bdc3ea0/go.mod h1:4kwyoJ9Sy/CdQpec3FcedeHys84wp/VruKocDobDTao=
 github.com/NOT-REAL-GAMES/vulkango v0.0.0-20251114215909-0394a5d7af12 h1:aGOn7ZOGBJbK+0XksGwzA5kEUzjEIMPGgVxVnCBABS8=
 github.com/NOT-REAL-GAMES/vulkango v0.0.0-20251114215909-0394a5d7af12/go.mod h1:4kwyoJ9Sy/CdQpec3FcedeHys84wp/VruKocDobDTao=
+golang.org/x/sync v0.18.0 h1:kr88TuHDroi+UVf+0hZnirlk8o8T+4MrK6mr60WkH/I=
+golang.org/x/sync v0.18.0/go.mod h1:9KTHXmSnoGruLpwFjVSX0lNNA75CykiMECbovNTZqGI=
