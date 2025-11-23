@@ -2434,6 +2434,9 @@ void main() {
 			// Progressive streaming state (RAGE-style)
 			CurrentMip   int       // Currently loaded mip (4=lowest/fastest, 0=full quality)
 			StreamCancel chan bool // Send signal here to cancel ongoing streaming
+
+			// Per-frame synchronization for fast frame switching
+			LastFence vk.Fence // Fence signaled when this frame's last GPU work completes
 		}
 		frameTextures := make(map[int]*FrameTexture)
 		_ = 0 // streamingFrameNum will be used for progressive streaming (TODO)
@@ -3929,7 +3932,7 @@ void main() {
 
 			cmd.End()
 
-			// Create fence for synchronization
+			// Create fence for per-frame synchronization (for fast frame switching)
 			fmt.Printf("[SAVE] Creating fence for frame %d\n", currentFrame)
 			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
 			if err != nil {
@@ -3944,15 +3947,16 @@ void main() {
 				panic(fmt.Sprintf("Failed to submit: %v", err))
 			}
 
-			// Wait for fence, then clean up
-			fmt.Printf("[SAVE] Waiting for fence for frame %d...\n", currentFrame)
-			err = device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
-			if err != nil {
-				panic(fmt.Sprintf("Failed to wait for fence: %v", err))
+			// Destroy old fence if it exists, then store new fence
+			// Frame switching will wait for this fence instead of WaitIdle()
+			if frameTexture.LastFence != (vk.Fence{}) {
+				device.DestroyFence(frameTexture.LastFence)
 			}
-			fmt.Printf("[SAVE] Fence signaled for frame %d\n", currentFrame)
-			device.DestroyFence(fence)
+			frameTexture.LastFence = fence
+
+			// Free command buffer (but don't wait for fence - let frame switch wait for it)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
+			fmt.Printf("[SAVE] Frame %d saved (fence stored, not waiting)\n", currentFrame)
 
 			fmt.Printf("Saved frame %d\n", currentFrame)
 		}
@@ -4268,7 +4272,7 @@ void main() {
 
 			cmd.End()
 
-			// Create fence for synchronization
+			// Create fence for per-frame synchronization
 			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
@@ -4278,9 +4282,17 @@ void main() {
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
 
-			// Wait for fence, then clean up
+			// Wait for fence (loading must complete before proceeding)
 			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
-			device.DestroyFence(fence)
+
+			// Store fence for this frame's load operation
+			// Even though we waited, future frame switches will check this fence
+			// Destroy old fence if it exists
+			if frameTexture.LastFence != (vk.Fence{}) {
+				device.DestroyFence(frameTexture.LastFence)
+			}
+			frameTexture.LastFence = fence
+
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
 			// RAGE-style progressive streaming: Only for existing frames (new frames already started streaming)
@@ -4324,16 +4336,20 @@ void main() {
 			oldFrame := timeline.CurrentFrame
 			fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
 
-			// CRITICAL: Wait for GPU queue to finish pending work before switching frames
-			// Using queue.WaitIdle() instead of device.WaitIdle() for better Windows performance
-			// (device.WaitIdle waits for ENTIRE device, queue.WaitIdle only waits for graphics queue)
-			fmt.Println("[SWITCH] Waiting for queue idle...")
-			time.Sleep(1 * time.Millisecond)
-			err := queue.WaitIdle()
-			if err != nil {
-				panic(fmt.Sprintf("Queue WaitIdle failed: %v", err))
+			// Per-frame fence synchronization: Only wait for the OLD frame's GPU work
+			// This is MUCH faster than queue.WaitIdle() which waits for everything
+			if oldFrameTexture := frameTextures[oldFrame]; oldFrameTexture != nil && oldFrameTexture.LastFence != (vk.Fence{}) {
+				fmt.Printf("[SWITCH] Waiting for frame %d's fence...\n", oldFrame)
+				time.Sleep(1 * time.Millisecond) // Still needed to prevent hangs
+				err := device.WaitForFences([]vk.Fence{oldFrameTexture.LastFence}, true, ^uint64(0))
+				if err != nil {
+					panic(fmt.Sprintf("Failed to wait for frame %d fence: %v", oldFrame, err))
+				}
+				fmt.Printf("[SWITCH] Frame %d fence signaled\n", oldFrame)
+			} else {
+				// No fence to wait for (first frame or frame never saved)
+				fmt.Printf("[SWITCH] No fence for frame %d, skipping wait\n", oldFrame)
 			}
-			fmt.Println("[SWITCH] Queue idle complete")
 
 			// Save current frame
 			saveCurrentFrame()
