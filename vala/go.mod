@@ -7,8 +7,8 @@ require (
 	github.com/NOT-REAL-GAMES/vulkango v0.0.0-20251114215909-0394a5d7af12
 )
 
-require golang.org/x/sync v0.18.0 // indirect
+require golang.org/x/sync v0.18.0 
 
-replace github.com/NOT-REAL-GAMES/sdl3go => /home/tremor/sdl3go //C:\Projects\sdl3go  //
+replace github.com/NOT-REAL-GAMES/sdl3go => C:\Projects\sdl3go  ///home/tremor/sdl3go
 
-replace github.com/NOT-REAL-GAMES/vulkango => /home/tremor/vulkango // C:\Projects\vulkango
+replace github.com/NOT-REAL-GAMES/vulkango => C:\Projects\vulkango ///home/tremor/vulkango
