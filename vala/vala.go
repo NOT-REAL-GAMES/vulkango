@@ -4315,15 +4315,17 @@ void main() {
 
 		// Frame switching synchronization
 		var frameSwitchInProgress bool
+		var pendingFrameSwitch int = -1            // -1 means no pending switch
 		frameSwitchSem := semaphore.NewWeighted(1) // Weight of 1 = only one switch at a time
 
-		// switchToFrame handles the complete frame switch (save current, load new)
-		switchToFrame := func(newFrame int) {
-			// CRITICAL: Use TryAcquire to prevent overlapping frame switches
-			// If a switch is already in progress, skip this request instead of queuing
-			// This prevents GPU driver crashes from simultaneous switches
+		// Declare switchToFrame first so it can call itself for pending switches
+		var switchToFrame func(int)
+		switchToFrame = func(newFrame int) {
+			// If a switch is already in progress, queue this request instead of skipping
+			// This ensures we always reach the destination frame
 			if !frameSwitchSem.TryAcquire(1) {
-				fmt.Printf("[SWITCH] Frame switch already in progress, skipping request for frame %d\n", newFrame)
+				fmt.Printf("[SWITCH] Frame switch in progress, queueing frame %d\n", newFrame)
+				pendingFrameSwitch = newFrame // Remember the most recent request
 				return
 			}
 			defer frameSwitchSem.Release(1)
@@ -4383,6 +4385,15 @@ void main() {
 			frameComp := world.GetText(frameCounterText)
 			if frameComp != nil {
 				frameComp.Content = fmt.Sprintf("Frame: %d/%d", timeline.CurrentFrame, timeline.TotalFrames-1)
+			}
+
+			// Check if there's a pending frame switch request (from rapid scrubbing)
+			// This ensures we always reach the final destination frame
+			if pendingFrameSwitch >= 0 && pendingFrameSwitch != timeline.CurrentFrame {
+				nextFrame := pendingFrameSwitch
+				pendingFrameSwitch = -1 // Clear pending request
+				fmt.Printf("[SWITCH] Processing queued switch to frame %d\n", nextFrame)
+				go switchToFrame(nextFrame) // Trigger next switch asynchronously
 			}
 		}
 
