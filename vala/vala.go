@@ -3890,17 +3890,27 @@ void main() {
 			cmd.End()
 
 			// Create fence for synchronization
+			fmt.Printf("[SAVE] Creating fence for frame %d\n", currentFrame)
 			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
 			}
 
-			queue.Submit([]vk.SubmitInfo{
+			fmt.Printf("[SAVE] Submitting command buffer for frame %d\n", currentFrame)
+			err = queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
+			if err != nil {
+				panic(fmt.Sprintf("Failed to submit: %v", err))
+			}
 
 			// Wait for fence, then clean up
-			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			fmt.Printf("[SAVE] Waiting for fence for frame %d...\n", currentFrame)
+			err = device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			if err != nil {
+				panic(fmt.Sprintf("Failed to wait for fence: %v", err))
+			}
+			fmt.Printf("[SAVE] Fence signaled for frame %d\n", currentFrame)
 			device.DestroyFence(fence)
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
