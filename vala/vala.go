@@ -4324,16 +4324,16 @@ void main() {
 			oldFrame := timeline.CurrentFrame
 			fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
 
-			// CRITICAL: Wait for GPU to finish all pending work before switching frames
-			// This prevents crashes when scrubbing through frames quickly
-			// Use device.WaitIdle() instead of WaitForFences to avoid waiting for unsignaled fences
-			fmt.Println("[SWITCH] Waiting for device idle...")
+			// CRITICAL: Wait for GPU queue to finish pending work before switching frames
+			// Using queue.WaitIdle() instead of device.WaitIdle() for better Windows performance
+			// (device.WaitIdle waits for ENTIRE device, queue.WaitIdle only waits for graphics queue)
+			fmt.Println("[SWITCH] Waiting for queue idle...")
 			time.Sleep(1 * time.Millisecond)
-			err := device.WaitIdle()
+			err := queue.WaitIdle()
 			if err != nil {
-				panic(fmt.Sprintf("WaitIdle failed: %v", err))
+				panic(fmt.Sprintf("Queue WaitIdle failed: %v", err))
 			}
-			fmt.Println("[SWITCH] Device idle complete")
+			fmt.Println("[SWITCH] Queue idle complete")
 
 			// Save current frame
 			saveCurrentFrame()
