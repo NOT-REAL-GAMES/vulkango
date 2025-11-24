@@ -3821,6 +3821,12 @@ void main() {
 				fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
 				return
 			}
+			// Lock to safely read frame resource handles
+			frameTexture.Mutex.Lock()
+			frameImage := frameTexture.Image
+			frameActualWidth := frameTexture.ActualWidth
+			frameActualHeight := frameTexture.ActualHeight
+			frameTexture.Mutex.Unlock()
 			// Lock frame resources to prevent concurrent upgrade
 
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -3848,7 +3854,7 @@ void main() {
 					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					SrcQueueFamilyIndex: ^uint32(0),
 					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
+					Image:               frameImage,
 					SubresourceRange: vk.ImageSubresourceRange{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
 						BaseMipLevel:   0,
@@ -3885,7 +3891,7 @@ void main() {
 			// Copy paintCanvas to frameTexture using blit
 			cmd.CmdBlitImage(
 				paintCanvas.GetImage(), vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				frameImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				[]vk.ImageBlit{{
 					SrcSubresource: vk.ImageSubresourceLayers{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
@@ -3905,7 +3911,7 @@ void main() {
 					},
 					DstOffsets: [2]vk.Offset3D{
 						{X: 0, Y: 0, Z: 0},
-						{X: int32(frameTexture.ActualWidth), Y: int32(frameTexture.ActualHeight), Z: 1},
+						{X: int32(frameActualWidth), Y: int32(frameActualHeight), Z: 1},
 					},
 				}},
 				vk.FILTER_NEAREST,
@@ -3994,11 +4000,14 @@ void main() {
 
 			// Destroy old fence if it exists, then store new (signaled) fence
 			// Frame switching will wait for this fence (returns immediately since already signaled)
+			// Lock to update LastFence
+			frameTexture.Mutex.Lock()
 			if frameTexture.LastFence != (vk.Fence{}) {
 				device.DestroyFence(frameTexture.LastFence)
 			}
 			frameTexture.LastFence = fence
 
+			frameTexture.Mutex.Unlock()
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 			fmt.Printf("[SAVE] Frame %d saved (fence stored and signaled)\n", currentFrame)
 
@@ -4189,6 +4198,15 @@ void main() {
 			}
 
 			// Lock frame resources to prevent concurrent upgrade
+			// Lock to safely read frame resource handles
+			frameTexture.Mutex.Lock()
+			frameImage := frameTexture.Image
+			frameIsLowRes := frameTexture.IsLowRes
+			frameActualWidth := frameTexture.ActualWidth
+			frameActualHeight := frameTexture.ActualHeight
+			frameMipLevels := frameTexture.MipLevels
+			frameCurrentMip := frameTexture.CurrentMip
+			frameTexture.Mutex.Unlock()
 			// Copy frameTexture to paintCanvas
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
 				CommandPool:        commandPool,
@@ -4251,21 +4269,21 @@ void main() {
 
 			// Copy frameTexture to paintCanvas
 			// RAGE: Use current mip level for faster loading (starts at mip 4 = 128×128, then streams to mip 0 = 2048×2048)
-			currentMip := frameTexture.CurrentMip
-			if currentMip > int(frameTexture.MipLevels)-1 {
-				currentMip = int(frameTexture.MipLevels) - 1 // Clamp to available mips
+			currentMip := frameCurrentMip
+			if currentMip > int(frameMipLevels)-1 {
+				currentMip = int(frameMipLevels) - 1 // Clamp to available mips
 			}
 
 			// Calculate source dimensions - for proxies, use actual size; for full-res, use mip level
 			var srcWidth, srcHeight uint32
-			if frameTexture.IsLowRes {
+			if frameIsLowRes {
 				// Low-res proxy: no mipmaps, just use actual dimensions
-				srcWidth = frameTexture.ActualWidth
-				srcHeight = frameTexture.ActualHeight
+				srcWidth = frameActualWidth
+				srcHeight = frameActualHeight
 			} else {
 				// Full-res with mipmaps: calculate mip dimensions
-				srcWidth = frameTexture.ActualWidth >> uint32(currentMip)
-				srcHeight = frameTexture.ActualHeight >> uint32(currentMip)
+				srcWidth = frameActualWidth >> uint32(currentMip)
+				srcHeight = frameActualHeight >> uint32(currentMip)
 				if srcWidth == 0 {
 					srcWidth = 1
 				}
@@ -4316,7 +4334,7 @@ void main() {
 					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					SrcQueueFamilyIndex: ^uint32(0),
 					DstQueueFamilyIndex: ^uint32(0),
-					Image:               frameTexture.Image,
+					Image:               frameImage,
 					SubresourceRange: vk.ImageSubresourceRange{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
 						BaseMipLevel:   0,
@@ -4585,39 +4603,42 @@ void main() {
 				return
 			}
 
-			queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{cmd}}}, fence)
-			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
-			device.DestroyFence(fence)
-			device.FreeCommandBuffers(commandPool, cmdBufs)
+		device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+		device.DestroyFence(fence)
+		device.FreeCommandBuffers(commandPool, cmdBufs)
 
-			// Lock mutex only for resource swap (don't hold during GPU operations)
-			// Clean up old resources
-			device.DestroyImageView(frameTexture.ImageView)
-			device.DestroyImage(frameTexture.Image)
-			device.FreeMemory(frameTexture.Memory)
+		// Lock ONLY for resource swap (destroying old, updating struct)
+		frameTexture.Mutex.Lock()
+		
+		// Clean up old resources
+		device.DestroyImageView(frameTexture.ImageView)
+		device.DestroyImage(frameTexture.Image)
+		device.FreeMemory(frameTexture.Memory)
 
-			// Update frame texture with new resources
-			frameTexture.Image = newImage
-			frameTexture.ImageView = newView
-			frameTexture.Memory = newMemory
-			frameTexture.MipLevels = mipLevels
-			frameTexture.ActualWidth = nextSize
-			frameTexture.ActualHeight = nextSize
+		// Update frame texture with new resources
+		frameTexture.Image = newImage
+		frameTexture.ImageView = newView
+		frameTexture.Memory = newMemory
+		frameTexture.MipLevels = mipLevels
+		frameTexture.ActualWidth = nextSize
+		frameTexture.ActualHeight = nextSize
 
-			// Update status
-			if nextSize == 2048 {
-				frameTexture.IsLowRes = false
-				frameTexture.CurrentMip = 4 // Start RAGE streaming from mip 4 (128×128)
-				fmt.Printf("[UPGRADE] Frame %d reached full resolution! Starting RAGE streaming from mip 4...\n", frameNum)
-				go streamFrameProgressive(frameNum)
-			} else {
-				// Still low-res, schedule next upgrade after delay
-				frameTexture.IsLowRes = true
-				fmt.Printf("[UPGRADE] Frame %d upgraded to %dx%d, scheduling next upgrade in 100ms...\n", frameNum, nextSize, nextSize)
-				time.AfterFunc(100*time.Millisecond, func() {
-					upgradeToFullResolution(frameNum) // Recursive call for next step!
-				})
-			}
+		// Update status
+		if nextSize == 2048 {
+			frameTexture.IsLowRes = false
+			frameTexture.CurrentMip = 4 // Start RAGE streaming from mip 4 (128×128)
+			frameTexture.Mutex.Unlock() // Unlock before starting goroutine
+			fmt.Printf("[UPGRADE] Frame %d reached full resolution! Starting RAGE streaming from mip 4...\n", frameNum)
+			go streamFrameProgressive(frameNum)
+		} else {
+			// Still low-res, schedule next upgrade after delay
+			frameTexture.IsLowRes = true
+			frameTexture.Mutex.Unlock() // Unlock before scheduling timer
+			fmt.Printf("[UPGRADE] Frame %d upgraded to %dx%d, scheduling next upgrade in 100ms...\n", frameNum, nextSize, nextSize)
+			time.AfterFunc(100*time.Millisecond, func() {
+				upgradeToFullResolution(frameNum) // Recursive call for next step!
+			})
+	}
 		}
 
 		// Declare switchToFrame first so it can call itself for pending switches
