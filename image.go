@@ -43,6 +43,7 @@ const (
 
 // Additional layouts
 const (
+	IMAGE_LAYOUT_GENERAL                  ImageLayout = C.VK_IMAGE_LAYOUT_GENERAL
 	IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ImageLayout = C.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 	IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL     ImageLayout = C.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
 	IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL     ImageLayout = C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
@@ -53,12 +54,14 @@ const (
 	ACCESS_TRANSFER_READ_BIT  AccessFlags = C.VK_ACCESS_TRANSFER_READ_BIT
 	ACCESS_TRANSFER_WRITE_BIT AccessFlags = C.VK_ACCESS_TRANSFER_WRITE_BIT
 	ACCESS_SHADER_READ_BIT    AccessFlags = C.VK_ACCESS_SHADER_READ_BIT
+	ACCESS_SHADER_WRITE_BIT   AccessFlags = C.VK_ACCESS_SHADER_WRITE_BIT
 )
 
 // Additional pipeline stages
 const (
 	PIPELINE_STAGE_TRANSFER_BIT        PipelineStageFlags = C.VK_PIPELINE_STAGE_TRANSFER_BIT
 	PIPELINE_STAGE_FRAGMENT_SHADER_BIT PipelineStageFlags = C.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+	PIPELINE_STAGE_COMPUTE_SHADER_BIT  PipelineStageFlags = C.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
 )
 
 // Image Creation
@@ -126,6 +129,18 @@ func (device Device) CreateImageWithMemory(
 	properties MemoryPropertyFlags,
 	physicalDevice PhysicalDevice,
 ) (Image, DeviceMemory, error) {
+	return device.CreateImageWithMemoryAndMips(width, height, format, tiling, usage, properties, physicalDevice, 1)
+}
+
+func (device Device) CreateImageWithMemoryAndMips(
+	width, height uint32,
+	format Format,
+	tiling ImageTiling,
+	usage ImageUsageFlags,
+	properties MemoryPropertyFlags,
+	physicalDevice PhysicalDevice,
+	mipLevels uint32,
+) (Image, DeviceMemory, error) {
 
 	image, err := device.CreateImage(&ImageCreateInfo{
 		ImageType: IMAGE_TYPE_2D,
@@ -135,7 +150,7 @@ func (device Device) CreateImageWithMemory(
 			Height: height,
 			Depth:  1,
 		},
-		MipLevels:     1,
+		MipLevels:     mipLevels,
 		ArrayLayers:   1,
 		Samples:       SAMPLE_COUNT_1_BIT,
 		Tiling:        tiling,
