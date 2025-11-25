@@ -5781,6 +5781,10 @@ void main() {
 				// Using WaitIdle instead of WaitForFences to ensure ALL GPU work completes
 				queue.WaitIdle()
 
+				// Reset all in-flight fences after WaitIdle to ensure clean state
+				// WaitIdle signals all fences, so we reset them for the next frame
+				device.ResetFences(inFlightFences)
+
 				// 4. Update descriptor set (SAFE on main thread!)
 				textureIndex := ft.TextureIndex
 				binding := textureIndex / 16384
