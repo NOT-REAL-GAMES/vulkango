@@ -5778,12 +5778,8 @@ void main() {
 
 				// CRITICAL: Wait for GPU idle before updating descriptor set
 				// Windows requires this to prevent DEVICE_LOST during descriptor update
-				// Using WaitIdle instead of WaitForFences to ensure ALL GPU work completes
+				// WaitIdle ensures all submitted command buffers complete before we update
 				queue.WaitIdle()
-
-				// Reset all in-flight fences after WaitIdle to ensure clean state
-				// WaitIdle signals all fences, so we reset them for the next frame
-				device.ResetFences(inFlightFences)
 
 				// 4. Update descriptor set (SAFE on main thread!)
 				textureIndex := ft.TextureIndex
