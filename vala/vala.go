@@ -2146,7 +2146,7 @@ func main() {
 
 		fmt.Println("Color picker vertex buffer created!")
 
-		// Create command pool
+		// Create command pool for main render loop
 		commandPool, err := device.CreateCommandPool(&vk.CommandPoolCreateInfo{
 			Flags:            vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
 			QueueFamilyIndex: uint32(graphicsFamily),
@@ -2155,6 +2155,17 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyCommandPool(commandPool)
+
+		// Create separate command pool for background operations (frame upgrades, streaming)
+		// Command pools are NOT thread-safe, so we need separate pools for goroutines
+		transferCommandPool, err := device.CreateCommandPool(&vk.CommandPoolCreateInfo{
+			Flags:            vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+			QueueFamilyIndex: uint32(graphicsFamily),
+		})
+		if err != nil {
+			panic(err)
+		}
+		defer device.DestroyCommandPool(transferCommandPool)
 
 		// Create paint canvas
 		fmt.Println("\nCreating paint canvases (ping-pong buffers)...")
@@ -2444,8 +2455,14 @@ void main() {
 			// Per-frame synchronization for fast frame switching
 			LastFence vk.Fence   // Fence signaled when this frame's last GPU work completes
 			Mutex     sync.Mutex // Protects frame resources from concurrent access during upgrades
+
+			// Action replay tracking
+			NeedsReplay bool // True if this frame reached full resolution and needs action replay
 		}
 		frameTextures := make(map[int]*FrameTexture)
+		var frameTexturesMutex sync.RWMutex                 // Protects frameTextures map (maps are not thread-safe!)
+		upgradeCommandPoolMutex := semaphore.NewWeighted(1) // Only one upgrade at a time (command pool not thread-safe)
+
 		_ = 0 // streamingFrameNum will be used for progressive streaming (TODO)
 		fmt.Println("Initializing frame storage system...")
 
@@ -3812,6 +3829,9 @@ void main() {
 			fmt.Printf("[MIPMAPS] Generated %d mip levels (%dx%d → 1x1)\n", mipLevels, width, height)
 		}
 
+		// Declare replayRequested early so frame functions can access it
+		var replayRequested bool // Trigger full replay
+
 		// === Frame Switching Functions ===
 		// saveCurrentFrame copies paintCanvas content to current frame's storage
 		saveCurrentFrame := func(frameNum int) {
@@ -3821,13 +3841,23 @@ void main() {
 				fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
 				return
 			}
+
+			// Debug: Log frame save state for diagnostics
+			fmt.Printf("[SAVE] Frame %d: Starting save operation\n", currentFrame)
+			fmt.Printf("[SAVE]   - replayRequested=%v\n", replayRequested)
+			fmt.Printf("[SAVE]   - paintCanvas: %v (size: %dx%d)\n", paintCanvas.GetImage(), paintCanvas.GetWidth(), paintCanvas.GetHeight())
+
 			// Lock to safely read frame resource handles
 			frameTexture.Mutex.Lock()
 			frameImage := frameTexture.Image
 			frameActualWidth := frameTexture.ActualWidth
 			frameActualHeight := frameTexture.ActualHeight
+			frameIsLowRes := frameTexture.IsLowRes
+			frameNeedsReplay := frameTexture.NeedsReplay
 			frameTexture.Mutex.Unlock()
-			// Lock frame resources to prevent concurrent upgrade
+
+			fmt.Printf("[SAVE]   - frameTexture: %v (size: %dx%d, IsLowRes=%v, NeedsReplay=%v)\n",
+				frameImage, frameActualWidth, frameActualHeight, frameIsLowRes, frameNeedsReplay)
 
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
 				CommandPool:        commandPool,
@@ -3914,7 +3944,7 @@ void main() {
 						{X: int32(frameActualWidth), Y: int32(frameActualHeight), Z: 1},
 					},
 				}},
-				vk.FILTER_NEAREST,
+				vk.FILTER_LINEAR,
 			)
 
 			// Transition paintCanvas back to SHADER_READ_ONLY (do this BEFORE generating mipmaps)
@@ -4184,6 +4214,24 @@ void main() {
 					CurrentMip:   0, // No mips, so mip 0 is all we have
 					StreamCancel: make(chan bool, 1),
 				}
+
+				// Update bindless descriptor set to point to this new frame texture
+				const texturesPerBinding = 16384
+				binding := newTextureIndex / texturesPerBinding
+				arrayElement := newTextureIndex % texturesPerBinding
+				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					{
+						DstSet:          globalBindlessDescriptorSet,
+						DstBinding:      binding,
+						DstArrayElement: arrayElement,
+						DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						ImageInfo: []vk.DescriptorImageInfo{{
+							Sampler:     textureSampler,
+							ImageView:   newView,
+							ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						}},
+					},
+				})
 				frameTexture = frameTextures[frameNum]
 				fmt.Printf("[PROXY] Frame %d created as 32×32 proxy - will upgrade when scrubbing stops\n", frameNum)
 
@@ -4204,8 +4252,6 @@ void main() {
 			frameIsLowRes := frameTexture.IsLowRes
 			frameActualWidth := frameTexture.ActualWidth
 			frameActualHeight := frameTexture.ActualHeight
-			frameMipLevels := frameTexture.MipLevels
-			frameCurrentMip := frameTexture.CurrentMip
 			frameTexture.Mutex.Unlock()
 			// Copy frameTexture to paintCanvas
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -4269,30 +4315,24 @@ void main() {
 
 			// Copy frameTexture to paintCanvas
 			// RAGE: Use current mip level for faster loading (starts at mip 4 = 128×128, then streams to mip 0 = 2048×2048)
-			currentMip := frameCurrentMip
-			if currentMip > int(frameMipLevels)-1 {
-				currentMip = int(frameMipLevels) - 1 // Clamp to available mips
-			}
+			// CRITICAL: Always load from mip 0 (full resolution) for frame switching
+			// RAGE streaming uses CurrentMip for progressive loading, but frame switching
+			// needs the saved full-res data to show strokes correctly
+			const loadMip = 0
 
-			// Calculate source dimensions - for proxies, use actual size; for full-res, use mip level
+			// Calculate source dimensions - always use full resolution (mip 0)
 			var srcWidth, srcHeight uint32
 			if frameIsLowRes {
 				// Low-res proxy: no mipmaps, just use actual dimensions
 				srcWidth = frameActualWidth
 				srcHeight = frameActualHeight
 			} else {
-				// Full-res with mipmaps: calculate mip dimensions
-				srcWidth = frameActualWidth >> uint32(currentMip)
-				srcHeight = frameActualHeight >> uint32(currentMip)
-				if srcWidth == 0 {
-					srcWidth = 1
-				}
-				if srcHeight == 0 {
-					srcHeight = 1
-				}
+				// Full-res: always use mip 0 (full resolution)
+				srcWidth = frameActualWidth  // No bit shift - full resolution
+				srcHeight = frameActualHeight
 			}
 
-			fmt.Printf("[BLIT] Copying frame %d from mip %d (%dx%d) to paintCanvas (2048×2048)\n", frameNum, currentMip, srcWidth, srcHeight)
+			fmt.Printf("[BLIT] Copying frame %d from mip %d (%dx%d) to paintCanvas (2048×2048)\n", frameNum, loadMip, srcWidth, srcHeight)
 
 			cmd.CmdBlitImage(
 				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -4300,7 +4340,7 @@ void main() {
 				[]vk.ImageBlit{{
 					SrcSubresource: vk.ImageSubresourceLayers{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       uint32(currentMip), // RAGE: Use current mip instead of always 0!
+						MipLevel:       loadMip, // Always use mip 0 for frame switching
 						BaseArrayLayer: 0,
 						LayerCount:     1,
 					},
@@ -4319,7 +4359,7 @@ void main() {
 						{X: int32(paintCanvas.GetWidth()), Y: int32(paintCanvas.GetHeight()), Z: 1},
 					},
 				}},
-				vk.FILTER_NEAREST,
+				vk.FILTER_LINEAR,
 			)
 
 			// Transition frameTexture back to SHADER_READ_ONLY
@@ -4401,6 +4441,13 @@ void main() {
 				// Kick off RAGE-style progressive streaming in background
 				go streamFrameProgressive(frameNum)
 			}
+
+			// Check if this frame needs action replay (upgraded to full resolution while user was viewing another frame)
+			if frameTexture.NeedsReplay {
+				fmt.Printf("[REPLAY] Frame %d needs replay after upgrade - triggering action replay\n", frameNum)
+				frameTexture.NeedsReplay = false // Clear flag
+				replayRequested = true           // Trigger replay in next render loop
+			}
 		}
 
 		// Frame switching synchronization
@@ -4412,44 +4459,58 @@ void main() {
 		var scrubbingStopTimer *time.Timer
 		const scrubbingStopDelay = 300 * time.Millisecond // Wait 300ms after last frame switch
 
+		frameActions := make(map[int]*ActionRecorder)
+		frameActions[0] = NewActionRecorder() // Initialize frame 0
+		actionRecorder := frameActions[0]     // Current frame's recorder
+		var currentStroke []PenState          // Currently drawing stroke
+
+		// === Frame Upgrade System (32×32 → 128 → 512 → 2048) ===
 		var upgradeToFullResolution func(int)
 		upgradeToFullResolution = func(frameNum int) {
-			// Check if we should proceed - abort if we've switched away from this frame
-			if timeline.CurrentFrame != frameNum {
-				fmt.Printf("[UPGRADE] Aborting upgrade for frame %d - no longer current frame\n", frameNum)
+			// CRITICAL: Only one upgrade at a time (transferCommandPool is not thread-safe!)
+			if !upgradeCommandPoolMutex.TryAcquire(1) {
+				fmt.Printf("[UPGRADE] Frame %d: Another upgrade in progress, aborting\n", frameNum)
 				return
 			}
-			frameTexture := frameTextures[frameNum]
-			if frameTexture == nil || !frameTexture.IsLowRes {
-				return // Already full resolution or doesn't exist
-			}
-			// Lock frame resources to prevent concurrent save/load
+			defer upgradeCommandPoolMutex.Release(1)
 
-			// Gradual upgrade path: 32→128→512→2048
-			// Each step is fast, total upgrade happens over ~200ms
+			// CRITICAL: Protect map access (maps are not thread-safe in Go!)
+			frameTexturesMutex.RLock()
+			frameTexture := frameTextures[frameNum]
+			frameTexturesMutex.RUnlock()
+
+			if frameTexture == nil {
+				fmt.Printf("[UPGRADE] Frame %d: Frame doesn't exist, aborting\n", frameNum)
+				return
+			}
+
+			if !frameTexture.IsLowRes {
+				fmt.Printf("[UPGRADE] Frame %d: Already full resolution, aborting\n", frameNum)
+				return
+			}
+
+			// Determine next size
 			currentSize := frameTexture.ActualWidth
 			var nextSize uint32
-
-			if currentSize == 32 {
-				nextSize = 128 // First upgrade: 32→128 (16x pixels, very fast!)
-			} else if currentSize == 128 {
-				nextSize = 512 // Second upgrade: 128→512 (16x pixels, still fast)
-			} else if currentSize == 512 {
-				nextSize = 2048 // Final upgrade: 512→2048 (16x pixels, manageable)
-			} else {
-				return // Already at full resolution or unknown size
+			switch currentSize {
+			case 32:
+				nextSize = 128
+			case 128:
+				nextSize = 512
+			case 512:
+				nextSize = 2048
+			default:
+				return // Unknown size
 			}
 
-			fmt.Printf("[UPGRADE] Upgrading frame %d: %dx%d → %dx%d\n",
-				frameNum, currentSize, currentSize, nextSize, nextSize)
+			fmt.Printf("[UPGRADE] Frame %d: %dx%d → %dx%d\n", frameNum, currentSize, currentSize, nextSize, nextSize)
 
-			// Calculate mip levels for next size
+			// Calculate mip levels
 			mipLevels := calculateMipLevels(nextSize, nextSize)
 
-			// Create new image at next size
+			// Create new larger texture
 			newImage, newMemory, err := device.CreateImageWithMemory(
-				nextSize,
-				nextSize,
+				nextSize, nextSize,
 				vk.FORMAT_R8G8B8A8_UNORM,
 				vk.IMAGE_TILING_OPTIMAL,
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
@@ -4457,32 +4518,33 @@ void main() {
 				physicalDevice,
 			)
 			if err != nil {
-				fmt.Printf("[UPGRADE] Failed to create %dx%d image: %v\n", nextSize, nextSize, err)
+				fmt.Printf("[UPGRADE] Frame %d: Failed to create image: %v\n", frameNum, err)
 				return
 			}
 
 			newView, err := device.CreateImageViewForTexture(newImage, vk.FORMAT_R8G8B8A8_UNORM)
 			if err != nil {
-				fmt.Printf("[UPGRADE] Failed to create image view: %v\n", err)
+				fmt.Printf("[UPGRADE] Frame %d: Failed to create image view: %v\n", frameNum, err)
 				device.DestroyImage(newImage)
 				device.FreeMemory(newMemory)
 				return
 			}
 
-			// Copy current proxy content to larger image (upscaled)
+			// Use transferCommandPool for background blit
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-				CommandPool:        commandPool,
+				CommandPool:        transferCommandPool,
 				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
 				CommandBufferCount: 1,
 			})
 			if err != nil {
-				fmt.Printf("[UPGRADE] Failed to allocate command buffers: %v\n", err)
+				fmt.Printf("[UPGRADE] Frame %d: Failed to allocate command buffers: %v\n", frameNum, err)
 				device.DestroyImageView(newView)
 				device.DestroyImage(newImage)
 				device.FreeMemory(newMemory)
 				return
 			}
 			cmd := cmdBufs[0]
+
 			cmd.Begin(&vk.CommandBufferBeginInfo{
 				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 			})
@@ -4533,7 +4595,7 @@ void main() {
 				}},
 			)
 
-			// Blit from current size to next size (upscaled)
+			// Blit old → new (upscaling)
 			cmd.CmdBlitImage(
 				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				newImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -4559,14 +4621,172 @@ void main() {
 						{X: int32(nextSize), Y: int32(nextSize), Z: 1},
 					},
 				}},
-				vk.FILTER_NEAREST,
+				vk.FILTER_LINEAR,
 			)
 
-			// Generate mipmaps if this is the final size (2048×2048)
+			// Transition old image back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               frameTexture.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Generate mipmaps if reaching 2048
 			if nextSize == 2048 {
-				generateMipmaps(newImage, nextSize, nextSize, mipLevels, cmd)
+				// Transition to TRANSFER_SRC for mipmap generation
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+						DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               newImage,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     1,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				// Generate mipmaps
+				for i := uint32(1); i < mipLevels; i++ {
+					prevWidth := nextSize >> (i - 1)
+					prevHeight := nextSize >> (i - 1)
+					currWidth := nextSize >> i
+					currHeight := nextSize >> i
+					if currWidth == 0 {
+						currWidth = 1
+					}
+					if currHeight == 0 {
+						currHeight = 1
+					}
+
+					// Transition current mip to DST
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{{
+							SrcAccessMask:       0,
+							DstAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_UNDEFINED,
+							NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               newImage,
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   i,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						}},
+					)
+
+					// Blit previous mip → current mip
+					cmd.CmdBlitImage(
+						newImage, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						newImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						[]vk.ImageBlit{{
+							SrcSubresource: vk.ImageSubresourceLayers{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								MipLevel:       i - 1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+							SrcOffsets: [2]vk.Offset3D{
+								{X: 0, Y: 0, Z: 0},
+								{X: int32(prevWidth), Y: int32(prevHeight), Z: 1},
+							},
+							DstSubresource: vk.ImageSubresourceLayers{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								MipLevel:       i,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+							DstOffsets: [2]vk.Offset3D{
+								{X: 0, Y: 0, Z: 0},
+								{X: int32(currWidth), Y: int32(currHeight), Z: 1},
+							},
+						}},
+						vk.FILTER_LINEAR,
+					)
+
+					// Transition current mip to SRC for next iteration
+					cmd.PipelineBarrier(
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						vk.PIPELINE_STAGE_TRANSFER_BIT,
+						0,
+						[]vk.ImageMemoryBarrier{{
+							SrcAccessMask:       vk.ACCESS_TRANSFER_WRITE_BIT,
+							DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+							OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+							SrcQueueFamilyIndex: ^uint32(0),
+							DstQueueFamilyIndex: ^uint32(0),
+							Image:               newImage,
+							SubresourceRange: vk.ImageSubresourceRange{
+								AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+								BaseMipLevel:   i,
+								LevelCount:     1,
+								BaseArrayLayer: 0,
+								LayerCount:     1,
+							},
+						}},
+					)
+				}
+
+				// Transition all mips to SHADER_READ_ONLY
+				cmd.PipelineBarrier(
+					vk.PIPELINE_STAGE_TRANSFER_BIT,
+					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+					0,
+					[]vk.ImageMemoryBarrier{{
+						SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+						DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+						OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						SrcQueueFamilyIndex: ^uint32(0),
+						DstQueueFamilyIndex: ^uint32(0),
+						Image:               newImage,
+						SubresourceRange: vk.ImageSubresourceRange{
+							AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+							BaseMipLevel:   0,
+							LevelCount:     mipLevels,
+							BaseArrayLayer: 0,
+							LayerCount:     1,
+						},
+					}},
+				)
+
+				fmt.Printf("[MIPMAPS] Frame %d: Generated %d mip levels\n", frameNum, mipLevels)
 			} else {
-				// Just transition to SHADER_READ_ONLY for intermediate sizes
+				// Just transition to SHADER_READ_ONLY
 				cmd.PipelineBarrier(
 					vk.PIPELINE_STAGE_TRANSFER_BIT,
 					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -4592,55 +4812,109 @@ void main() {
 
 			cmd.End()
 
-			// Submit and wait
+			// Create fence for this upgrade operation
 			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
 			if err != nil {
-				fmt.Printf("[UPGRADE] Failed to create fence: %v\n", err)
-				device.FreeCommandBuffers(commandPool, cmdBufs)
+				fmt.Printf("[UPGRADE] Frame %d: Failed to create fence: %v\n", frameNum, err)
 				device.DestroyImageView(newView)
 				device.DestroyImage(newImage)
 				device.FreeMemory(newMemory)
 				return
 			}
 
-		device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
-		device.DestroyFence(fence)
-		device.FreeCommandBuffers(commandPool, cmdBufs)
+			// Submit and wait for THIS upgrade only
+			queue.Submit([]vk.SubmitInfo{
+				{CommandBuffers: []vk.CommandBuffer{cmd}},
+			}, fence)
+			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
 
-		// Lock ONLY for resource swap (destroying old, updating struct)
-		frameTexture.Mutex.Lock()
-		
-		// Clean up old resources
-		device.DestroyImageView(frameTexture.ImageView)
-		device.DestroyImage(frameTexture.Image)
-		device.FreeMemory(frameTexture.Memory)
+			// Clean up fence (don't free command buffers - let pool manage them)
+			device.DestroyFence(fence)
 
-		// Update frame texture with new resources
-		frameTexture.Image = newImage
-		frameTexture.ImageView = newView
-		frameTexture.Memory = newMemory
-		frameTexture.MipLevels = mipLevels
-		frameTexture.ActualWidth = nextSize
-		frameTexture.ActualHeight = nextSize
+			// Verify frame still exists
+			frameTexturesMutex.RLock()
+			stillExists := frameTextures[frameNum] != nil
+			frameTexturesMutex.RUnlock()
 
-		// Update status
-		if nextSize == 2048 {
-			frameTexture.IsLowRes = false
-			frameTexture.CurrentMip = 4 // Start RAGE streaming from mip 4 (128×128)
-			frameTexture.Mutex.Unlock() // Unlock before starting goroutine
-			fmt.Printf("[UPGRADE] Frame %d reached full resolution! Starting RAGE streaming from mip 4...\n", frameNum)
-			go streamFrameProgressive(frameNum)
-		} else {
-			// Still low-res, schedule next upgrade after delay
-			frameTexture.IsLowRes = true
-			frameTexture.Mutex.Unlock() // Unlock before scheduling timer
-			fmt.Printf("[UPGRADE] Frame %d upgraded to %dx%d, scheduling next upgrade in 100ms...\n", frameNum, nextSize, nextSize)
-			time.AfterFunc(100*time.Millisecond, func() {
-				upgradeToFullResolution(frameNum) // Recursive call for next step!
+			if !stillExists {
+				fmt.Printf("[UPGRADE] Frame %d: Deleted during upgrade, cleaning up\n", frameNum)
+				device.DestroyImageView(newView)
+				device.DestroyImage(newImage)
+				device.FreeMemory(newMemory)
+				return
+			}
+
+			// Lock frame for resource swap
+			frameTexture.Mutex.Lock()
+
+			// CRITICAL: Wait for frame's LastFence (from save/load operations)
+			// This ensures canvas operations finished before we destroy old image
+			if frameTexture.LastFence != (vk.Fence{}) {
+				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
+			}
+
+			// Destroy old resources
+			device.DestroyImageView(frameTexture.ImageView)
+			device.DestroyImage(frameTexture.Image)
+			device.FreeMemory(frameTexture.Memory)
+
+			// Update frame texture with new resources
+			frameTexture.Image = newImage
+			frameTexture.ImageView = newView
+			frameTexture.Memory = newMemory
+			frameTexture.MipLevels = mipLevels
+			frameTexture.ActualWidth = nextSize
+			frameTexture.ActualHeight = nextSize
+
+			// CRITICAL: Update bindless descriptor set
+			textureIndex := frameTexture.TextureIndex
+			const texturesPerBinding = 16384
+			binding := textureIndex / texturesPerBinding
+			arrayElement := textureIndex % texturesPerBinding
+			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				{
+					DstSet:          globalBindlessDescriptorSet,
+					DstBinding:      binding,
+					DstArrayElement: arrayElement,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					ImageInfo: []vk.DescriptorImageInfo{{
+						Sampler:     textureSampler,
+						ImageView:   newView,
+						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					}},
+				},
 			})
-	}
+
+			// Update status
+			if nextSize == 2048 {
+				frameTexture.IsLowRes = false
+				frameTexture.CurrentMip = 4 // Start RAGE streaming from mip 4
+				frameTexture.NeedsReplay = true
+				frameTexture.Mutex.Unlock()
+				fmt.Printf("[UPGRADE] Frame %d reached 2048×2048, will replay actions\n", frameNum)
+
+				// NOTE: Don't reload during upgrade - causes GPU command buffer race conditions!
+				// The frame will be reloaded when user switches back to it
+
+				// Start RAGE streaming
+				go streamFrameProgressive(frameNum)
+			} else {
+				// Still low-res, schedule next upgrade
+				frameTexture.Mutex.Unlock()
+				fmt.Printf("[UPGRADE] Frame %d reached %dx%d, scheduling next step\n", frameNum, nextSize, nextSize)
+
+				// NOTE: Don't reload during upgrade - causes GPU command buffer race conditions!
+				// The frame will be reloaded when user switches back to it
+
+				// Schedule next upgrade after 100ms
+				time.AfterFunc(100*time.Millisecond, func() {
+					upgradeToFullResolution(frameNum)
+				})
+			}
 		}
 
+		// === Action-based Undo System (Per-Frame) ===
+		// Each frame has its own independent action history
 		// Declare switchToFrame first so it can call itself for pending switches
 		var switchToFrame func(int)
 		switchToFrame = func(newFrame int) {
@@ -4685,10 +4959,16 @@ void main() {
 			}
 			// Update timeline FIRST to prevent upgrade from thinking old frame is still current
 			timeline.CurrentFrame = newFrame
+			// Switch to new frame's action recorder (create if doesn't exist)
+			if frameActions[newFrame] == nil {
+				frameActions[newFrame] = NewActionRecorder()
+				fmt.Printf("[ACTIONS] Created new action recorder for frame %d\n", newFrame)
+			}
+			actionRecorder = frameActions[newFrame]
+			fmt.Printf("[ACTIONS] Switched to frame %d action history (%d actions)\n", newFrame, len(actionRecorder.GetFullHistory()))
 
 			// Save OLD frame (before it gets upgraded)
 			saveCurrentFrame(oldFrame)
-
 
 			// RAGE: Cancel streaming for old frame before switching
 			if oldFrameTexture := frameTextures[oldFrame]; oldFrameTexture != nil {
@@ -4701,9 +4981,38 @@ void main() {
 				}
 			}
 
-
 			// Load new frame
 			loadFrame(newFrame)
+
+			// CRITICAL: Update brush descriptor set to point to the newly-loaded canvas
+			// Without this, the GPU shader reads from stale descriptor bindings and displays the old frame
+			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				{
+					DstSet:          brushDescriptorSet,
+					DstBinding:      0,
+					DstArrayElement: 0,
+					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					ImageInfo: []vk.DescriptorImageInfo{
+						{
+							Sampler:     canvasSampler,
+							ImageView:   paintCanvas.GetView(),
+							ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						},
+					},
+				},
+			})
+
+			// Check if this frame needs replay (after upgrade or if actions were added)
+			frameTexturesMutex.RLock()
+			needsReplay := frameTextures[newFrame] != nil && frameTextures[newFrame].NeedsReplay
+			frameTexturesMutex.RUnlock()
+
+			if needsReplay {
+				fmt.Printf("[REPLAY] Frame %d needs replay - triggering action replay\n", newFrame)
+				// NOTE: NeedsReplay flag will be cleared AFTER replay completes (not here)
+				// This prevents race conditions where frame switches before replay executes
+				replayRequested = true // Trigger replay in next render loop
+			}
 
 			// Update frame counter text
 			frameComp := world.GetText(frameCounterText)
@@ -4726,19 +5035,19 @@ void main() {
 			}
 			scrubbingStopTimer = time.AfterFunc(scrubbingStopDelay, func() {
 				fmt.Printf("[SCRUB] Scrubbing stopped on frame %d, upgrading to full resolution...\n", timeline.CurrentFrame)
-				upgradeToFullResolution(timeline.CurrentFrame)
+				go upgradeToFullResolution(timeline.CurrentFrame)
 			})
 		}
 
 		// Initialize paintCanvas with frame 0's content
 		loadFrame(0)
 		fmt.Println("Paint canvas initialized with frame 0")
+		// Start upgrade timer for initial frame
+		scrubbingStopTimer = time.AfterFunc(scrubbingStopDelay, func() {
+			fmt.Printf("[SCRUB] Initial load complete, upgrading frame 0 to full resolution...\n")
+			go upgradeToFullResolution(0)
+		})
 
-		// === Action-based Undo System ===
-		// Unified undo/redo for strokes and layer operations
-		actionRecorder := NewActionRecorder()
-		var currentStroke []PenState // Currently drawing stroke
-		var replayRequested bool     // Trigger full replay
 		// Create test UI button (toggles layer2 visibility with undo support)
 		testButton := world.CreateEntity()
 		buttonComponent := ecs.NewUIButton(300.0, 200.0, 150.0, 50.0, func() {
@@ -5433,6 +5742,11 @@ void main() {
 			cmd := commandBuffers[imageIndex]
 			cmd.Reset(0)
 			cmd.Begin(&vk.CommandBufferBeginInfo{})
+
+			// DEBUG: Check replay state every frame
+			if frameCounter%60 == 0 && replayRequested {
+				fmt.Printf("[DEBUG] Render loop: replayRequested=%v, actionRecorder.GetIndex()=%d\n", replayRequested, actionRecorder.GetIndex())
+			}
 
 			// === ACTION-BASED REPLAY: Clear and redraw all strokes ===
 			if replayRequested {
@@ -6314,6 +6628,14 @@ void main() {
 				}
 
 				replayRequested = false
+
+				// Clear NeedsReplay flag now that replay has actually completed
+				frameTexturesMutex.Lock()
+				if frameTextures[timeline.CurrentFrame] != nil {
+					frameTextures[timeline.CurrentFrame].NeedsReplay = false
+				}
+				frameTexturesMutex.Unlock()
+
 				fmt.Printf("Replay complete: rendered %d actions\n", actionRecorder.GetIndex())
 
 				// Update layer2's texture to point to the current paintCanvas after replay
@@ -6347,18 +6669,39 @@ void main() {
 
 			// === Stroke start: Detect pen down transition ===
 			if penDown && !prevPenDown && penPressure > 0.001 {
-				// Stroke just started
-				strokeActive = true
-				isFirstFrameOfStroke = true // Skip interpolation on first frame
-				strokeFrameCount = 0        // Reset frame counter
+				// Check if current frame is low-res - deny strokes on low-res frames
+				frameTexturesMutex.RLock()
+				currentFrameTexture := frameTextures[timeline.CurrentFrame]
+				frameTexturesMutex.RUnlock()
 
-				fmt.Printf("=== Stroke started (action-based undo) ===\n")
+				if currentFrameTexture != nil && currentFrameTexture.IsLowRes {
+					fmt.Printf("[BRUSH DENIED] Cannot paint on low-res frame %d (size: %dx%d) - waiting for upgrade to full resolution\n",
+						timeline.CurrentFrame, currentFrameTexture.ActualWidth, currentFrameTexture.ActualHeight)
+				} else {
+					// Stroke just started
+					strokeActive = true
+					isFirstFrameOfStroke = true // Skip interpolation on first frame
+					strokeFrameCount = 0        // Reset frame counter
+
+					fmt.Printf("=== Stroke started (action-based undo) ===\n")
+				}
 			}
 
 			cXLast, cYLast := float32(0.0), float32(0.0)
 
 			// === PASS 0: Render brush strokes to canvas (if pen is down) ===
 			if penDown && penPressure > 0.001 {
+				// Defensive check: Skip rendering if current frame is low-res
+				frameTexturesMutex.RLock()
+				currentFrameTexture := frameTextures[timeline.CurrentFrame]
+				isCurrentFrameLowRes := currentFrameTexture != nil && currentFrameTexture.IsLowRes
+				frameTexturesMutex.RUnlock()
+
+				if isCurrentFrameLowRes {
+					// Skip rendering - frame is still upgrading
+					goto skipBrushRender
+				}
+
 				// Get layer2's transform to account for canvas position/scale
 				layer2Transform := world.GetTransform(layer2)
 
@@ -6806,6 +7149,13 @@ void main() {
 						}
 						actionRecorder.RecordStroke(newStroke)
 
+						// Mark this frame as needing replay (for when it's upgraded to full resolution)
+						frameTexturesMutex.Lock()
+						if frameTextures[timeline.CurrentFrame] != nil {
+							frameTextures[timeline.CurrentFrame].NeedsReplay = true
+						}
+						frameTexturesMutex.Unlock()
+
 						// Note: Snapshots are created during replay, not during normal drawing
 						// (we can't call vkCmdCopyImage outside of command buffer recording)
 
@@ -6853,6 +7203,7 @@ void main() {
 			// Update prevPenDown for stroke tracking
 			prevPenDown = penDown
 
+		skipBrushRender:
 			// ===  PASS 1: Render each layer to its framebuffer ===
 			// Only render ROOT layers (layers with no parent)
 			// Groups will composite their children to their framebuffer
