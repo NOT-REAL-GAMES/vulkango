@@ -573,6 +573,22 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Windows drivers are strict about simultaneous GPU memory operations
 var gpuMemoryMutex sync.Mutex
 
+// PendingUpgrade holds resources ready to be swapped into a frame
+// Upgrades are prepared in background goroutines, then applied on main thread
+// to avoid descriptor set contention (Windows WDDM requirement)
+type PendingUpgrade struct {
+	FrameIndex   int
+	NewImage     vk.Image
+	NewView      vk.ImageView
+	NewMemory    vk.DeviceMemory
+	NewMipLevels uint32
+	NewSize      uint32
+}
+
+// Upgrade queue - background thread sends completed upgrades here
+// Main thread processes them safely (no descriptor set contention)
+var upgradeQueue = make(chan PendingUpgrade, 10)
+
 func LoadImage(path string) (*ImageData, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -4041,7 +4057,7 @@ void main() {
 			// CRITICAL: Must wait for save to complete before continuing
 			// Otherwise main render loop will use paintCanvas while GPU is still reading it
 			fmt.Printf("[SAVE] Waiting for fence for frame %d...\n", currentFrame)
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 			err = device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
 			if err != nil {
 				panic(fmt.Sprintf("Failed to wait for fence: %v", err))
@@ -4564,6 +4580,14 @@ void main() {
 				return
 			}
 
+			// CRITICAL: Wait for frame's LastFence BEFORE blitting
+			// This ensures any ongoing save/load operation completes first
+			frameTexture.Mutex.Lock()
+			if frameTexture.LastFence != (vk.Fence{}) {
+				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
+			}
+			frameTexture.Mutex.Unlock()
+
 			// Use transferCommandPool for background blit
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
 				CommandPool:        transferCommandPool,
@@ -4878,86 +4902,25 @@ void main() {
 				return
 			}
 
-			// Lock frame for resource swap
-			frameTexture.Mutex.Lock()
-
-			// CRITICAL: Wait for frame's LastFence (from save/load operations)
-			// This ensures canvas operations finished before we destroy old image
-			if frameTexture.LastFence != (vk.Fence{}) {
-				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
+			// CRITICAL: Send upgrade to main thread for safe descriptor update
+			// Updating descriptor sets from goroutine causes contention on Windows (WDDM)
+			// Main thread will handle resource swap + descriptor update + garbage queueing
+			upgradeQueue <- PendingUpgrade{
+				FrameIndex:   frameNum,
+				NewImage:     newImage,
+				NewView:      newView,
+				NewMemory:    newMemory,
+				NewMipLevels: mipLevels,
+				NewSize:      nextSize,
 			}
+			fmt.Printf("[UPGRADE] Frame %d: Heavy lifting done (%dx%d), queued for main thread swap\n", frameNum, nextSize, nextSize)
 
-			// Save old resources before updating (for deferred destruction)
-			oldImage := frameTexture.Image
-			oldView := frameTexture.ImageView
-			oldMem := frameTexture.Memory
-
-			// Update frame texture with new resources FIRST
-			// This makes the new resources immediately available to the render loop
-			frameTexture.Image = newImage
-			frameTexture.ImageView = newView
-			frameTexture.Memory = newMemory
-			frameTexture.MipLevels = mipLevels
-			frameTexture.ActualWidth = nextSize
-			frameTexture.ActualHeight = nextSize
-
-			// CRITICAL: Update bindless descriptor set
-			textureIndex := frameTexture.TextureIndex
-			const texturesPerBinding = 16384
-			binding := textureIndex / texturesPerBinding
-			arrayElement := textureIndex % texturesPerBinding
-			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
-				{
-					DstSet:          globalBindlessDescriptorSet,
-					DstBinding:      binding,
-					DstArrayElement: arrayElement,
-					DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-					ImageInfo: []vk.DescriptorImageInfo{{
-						Sampler:     textureSampler,
-						ImageView:   newView,
-						ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					}},
-				},
-			})
-
-			// Queue old resources for deferred destruction
-			// Cannot destroy immediately - they may still be referenced by in-flight command buffers
-			garbageMutex.Lock()
-			garbageQueue = append(garbageQueue, GPUGarbage{
-				Image:      oldImage,
-				ImageView:  oldView,
-				Memory:     oldMem,
-				DeathFrame: frameCounter, // Will be safely destroyed after FRAMES_IN_FLIGHT + 2 frames
-			})
-			garbageMutex.Unlock()
-			fmt.Printf("[GARBAGE] Frame %d: Queued old resources for deferred destruction (death frame: %d)\n", frameNum, frameCounter)
-
-			// Update status
-			if nextSize == 2048 {
-				frameTexture.IsLowRes = false
-				frameTexture.CurrentMip = 4 // Start RAGE streaming from mip 4
-				frameTexture.NeedsReplay = true
-				frameTexture.Mutex.Unlock()
-				fmt.Printf("[UPGRADE] Frame %d reached 2048×2048, will replay actions\n", frameNum)
-
-				// NOTE: Don't reload during upgrade - causes GPU command buffer race conditions!
-				// The frame will be reloaded when user switches back to it
-
-				// Start RAGE streaming
-				go streamFrameProgressive(frameNum)
-			} else {
-				// Still low-res, schedule next upgrade
-				frameTexture.Mutex.Unlock()
-				fmt.Printf("[UPGRADE] Frame %d reached %dx%d, scheduling next step\n", frameNum, nextSize, nextSize)
-
-				// NOTE: Don't reload during upgrade - causes GPU command buffer race conditions!
-				// The frame will be reloaded when user switches back to it
-
-				// Schedule next upgrade after 100ms
-				time.AfterFunc(100*time.Millisecond, func() {
-					upgradeToFullResolution(frameNum)
-				})
-			}
+			// Main thread will handle the rest:
+			// - Resource swap
+			// - Descriptor set update (safe on main thread!)
+			// - Garbage queueing
+			// - Scheduling next upgrade or starting RAGE streaming
+			return
 		}
 
 		// === Action-based Undo System (Per-Frame) ===
@@ -5786,6 +5749,83 @@ void main() {
 			}
 			garbageQueue = garbageQueue[:n]
 			garbageMutex.Unlock()
+
+			// === PROCESS PENDING UPGRADES (Main Thread Safe) ===
+			// Upgrades are prepared in background goroutines, then applied here
+			// This prevents descriptor set contention (Windows WDDM requirement)
+			select {
+			case upgrade := <-upgradeQueue:
+				frameTexturesMutex.Lock()
+				ft := frameTextures[upgrade.FrameIndex]
+
+				// 1. Wait for frame's LastFence (from save/load operations)
+				if ft.LastFence != (vk.Fence{}) {
+					device.WaitForFences([]vk.Fence{ft.LastFence}, true, ^uint64(0))
+				}
+
+				// 2. Capture old resources for garbage collection
+				oldImage := ft.Image
+				oldView := ft.ImageView
+				oldMem := ft.Memory
+
+				// 3. Atomic swap in Go memory
+				ft.Image = upgrade.NewImage
+				ft.ImageView = upgrade.NewView
+				ft.Memory = upgrade.NewMemory
+				ft.MipLevels = upgrade.NewMipLevels
+				ft.ActualWidth = upgrade.NewSize
+				ft.ActualHeight = upgrade.NewSize
+
+				// 4. Update descriptor set (SAFE on main thread!)
+				textureIndex := ft.TextureIndex
+				binding := textureIndex / 16384
+				arrayElement := textureIndex % 16384
+
+				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					{
+						DstSet:          globalBindlessDescriptorSet,
+						DstBinding:      binding,
+						DstArrayElement: arrayElement,
+						DescriptorType:  vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						ImageInfo: []vk.DescriptorImageInfo{{
+							Sampler:     textureSampler,
+							ImageView:   upgrade.NewView,
+							ImageLayout: vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						}},
+					},
+				})
+
+				// 5. Queue old resources for garbage collection
+				garbageMutex.Lock()
+				garbageQueue = append(garbageQueue, GPUGarbage{
+					Image:      oldImage,
+					ImageView:  oldView,
+					Memory:     oldMem,
+					DeathFrame: frameCounter,
+				})
+				garbageMutex.Unlock()
+
+				// 6. Update frame status and schedule next step
+				if upgrade.NewSize == 2048 {
+					ft.IsLowRes = false
+					ft.CurrentMip = 4 // Start RAGE streaming from mip 4
+					ft.NeedsReplay = true
+					frameTexturesMutex.Unlock()
+					fmt.Printf("[MAIN] Swapped frame %d to 2048×2048 safely\n", upgrade.FrameIndex)
+					go streamFrameProgressive(upgrade.FrameIndex)
+				} else {
+					ft.IsLowRes = true
+					frameTexturesMutex.Unlock()
+					fmt.Printf("[MAIN] Swapped frame %d to %dx%d safely\n", upgrade.FrameIndex, upgrade.NewSize, upgrade.NewSize)
+					// Schedule next upgrade step
+					time.AfterFunc(100*time.Millisecond, func() {
+						upgradeToFullResolution(upgrade.FrameIndex)
+					})
+				}
+
+			default:
+				// No upgrades pending, continue
+			}
 
 			l2tx := world.GetTransform(layer2).X
 			l2ty := world.GetTransform(layer2).Y
