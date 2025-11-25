@@ -584,9 +584,18 @@ type SafeQueue struct {
 
 // Submit wraps vkQueueSubmit with mutex protection
 func (sq *SafeQueue) Submit(submits []vk.SubmitInfo, fence vk.Fence) error {
+	fmt.Printf("[SAFE QUEUE] Submit called - acquiring lock...\n")
 	sq.Mutex.Lock()
-	defer sq.Mutex.Unlock()
-	return sq.Handle.Submit(submits, fence)
+	fmt.Printf("[SAFE QUEUE] Lock acquired, submitting...\n")
+	defer func() {
+		sq.Mutex.Unlock()
+		fmt.Printf("[SAFE QUEUE] Lock released\n")
+	}()
+	err := sq.Handle.Submit(submits, fence)
+	if err != nil {
+		fmt.Printf("[SAFE QUEUE] ERROR: %v\n", err)
+	}
+	return err
 }
 
 // WaitIdle wraps vkQueueWaitIdle with mutex protection
