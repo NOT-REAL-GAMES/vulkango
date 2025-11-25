@@ -5776,12 +5776,12 @@ void main() {
 				ft.ActualWidth = upgrade.NewSize
 				ft.ActualHeight = upgrade.NewSize
 
-				// CRITICAL: Wait for GPU idle before updating descriptor set
-				// Windows requires this to prevent DEVICE_LOST during descriptor update
-				// WaitIdle ensures all submitted command buffers complete before we update
-				queue.WaitIdle()
-
 				// 4. Update descriptor set (SAFE on main thread!)
+				// This is safe because:
+				// - We're on the main thread (no concurrent access)
+				// - We do this BEFORE recording new command buffers
+				// - Old image still valid (queued for garbage collection)
+				// - New image ready (background thread waited for blit)
 				textureIndex := ft.TextureIndex
 				binding := textureIndex / 16384
 				arrayElement := textureIndex % 16384
