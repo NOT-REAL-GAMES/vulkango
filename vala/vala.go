@@ -5775,7 +5775,10 @@ void main() {
 				ft.ActualWidth = upgrade.NewSize
 				ft.ActualHeight = upgrade.NewSize
 
-				// 4. Update descriptor set (SAFE on main thread!)
+				// 3. NUCLEAR OPTION: Wait for ALL GPU work to finish
+				device.WaitIdle()
+
+				// 4. Update descriptor set
 				// This is safe because:
 				// - We're on the main thread (no concurrent access)
 				// - We do this BEFORE recording new command buffers
