@@ -573,6 +573,11 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Windows drivers are strict about simultaneous GPU memory operations
 var gpuMemoryMutex sync.Mutex
 
+// Queue submission mutex - prevents concurrent queue operations from multiple threads
+// CRITICAL: Windows WDDM requires serialized queue submissions
+// Without this, concurrent queue.Submit() from main loop + upgrade goroutines = DEVICE_LOST
+var queueMutex sync.Mutex
+
 // PendingUpgrade holds resources ready to be swapped into a frame
 // Upgrades are prepared in background goroutines, then applied on main thread
 // to avoid descriptor set contention (Windows WDDM requirement)
@@ -769,7 +774,9 @@ func CreateImageLayer(
 	uploadCmd.End()
 
 	// Submit and wait
+	queueMutex.Lock()
 	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
+	queueMutex.Unlock()
 	if err != nil {
 		device.DestroyImage(textureImage)
 		device.FreeMemory(textureMemory)
@@ -929,7 +936,9 @@ func CreateImageLayer(
 	)
 	cmd.End()
 
+	queueMutex.Lock()
 	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{cmd}}}, vk.Fence{})
+	queueMutex.Unlock()
 	if err != nil {
 		return entity, fmt.Errorf("failed to submit transition command: %v", err)
 	}
@@ -2460,9 +2469,11 @@ void main() {
 			cmd.End()
 
 			// Submit and wait
+			queueMutex.Lock()
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, vk.Fence{})
+			queueMutex.Unlock()
 			queue.WaitIdle()
 
 			device.FreeCommandBuffers(commandPool, cmdBufs)
@@ -2728,9 +2739,11 @@ void main() {
 		uploadCmd.End()
 
 		// Submit and wait
+		queueMutex.Lock()
 		queue.Submit([]vk.SubmitInfo{
 			{CommandBuffers: []vk.CommandBuffer{uploadCmd}},
 		}, vk.Fence{})
+		queueMutex.Unlock()
 		queue.WaitIdle()
 
 		// Clean up staging buffer
@@ -2923,7 +2936,9 @@ void main() {
 		atlasUploadCmd.End()
 
 		// Submit and wait
+		queueMutex.Lock()
 		err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{atlasUploadCmd}}}, vk.Fence{})
+		queueMutex.Unlock()
 		if err != nil {
 			panic(fmt.Sprintf("Atlas upload submit failed: %v", err))
 		}
@@ -4051,9 +4066,11 @@ void main() {
 			}
 
 			fmt.Printf("[SAVE] Submitting command buffer for frame %d\n", currentFrame)
+			queueMutex.Lock()
 			err = queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
+			queueMutex.Unlock()
 			if err != nil {
 				panic(fmt.Sprintf("Failed to submit: %v", err))
 			}
@@ -4464,9 +4481,11 @@ void main() {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
 			}
 
+			queueMutex.Lock()
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
+			queueMutex.Unlock()
 
 			// Wait for fence (loading must complete before proceeding)
 			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
@@ -4885,9 +4904,12 @@ void main() {
 			}
 
 			// Submit and wait for THIS upgrade only
+			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
+			queueMutex.Lock()
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
+			queueMutex.Unlock()
 			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
 
 			// Clean up fence (don't free command buffers - let pool manage them)
@@ -5360,11 +5382,13 @@ void main() {
 		transitionCmd.End()
 
 		// Submit and wait for completion
+		queueMutex.Lock()
 		err = queue.Submit([]vk.SubmitInfo{
 			{
 				CommandBuffers: []vk.CommandBuffer{transitionCmd},
 			},
 		}, vk.Fence{})
+		queueMutex.Unlock()
 		if err != nil {
 			panic(fmt.Sprintf("Failed to submit transition commands: %v", err))
 		}
@@ -7779,6 +7803,8 @@ void main() {
 			cmd.End()
 
 			// Submit command buffer
+			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
+			queueMutex.Lock()
 			err = queue.Submit([]vk.SubmitInfo{
 				{
 					WaitSemaphores:   []vk.Semaphore{imageAvailableSems[currentFrame]},
@@ -7787,6 +7813,7 @@ void main() {
 					SignalSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				},
 			}, inFlightFences[imageIndex])
+			queueMutex.Unlock()
 			if err != nil {
 				panic(fmt.Sprintf("Queue submit failed: %v", err))
 			}
