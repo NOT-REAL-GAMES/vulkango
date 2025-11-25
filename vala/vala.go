@@ -5757,8 +5757,11 @@ void main() {
 			// === PROCESS PENDING UPGRADES (Main Thread Safe) ===
 			// Upgrades are prepared in background goroutines, then applied here
 			// This prevents descriptor set contention (Windows WDDM requirement)
-			select {
-			case upgrade := <-upgradeQueue:
+			// CRITICAL: Drain ALL pending upgrades before rendering!
+		upgradeLoop:
+			for {
+				select {
+				case upgrade := <-upgradeQueue:
 				frameTexturesMutex.Lock()
 				ft := frameTextures[upgrade.FrameIndex]
 
@@ -5831,8 +5834,10 @@ void main() {
 					})
 				}
 
-			default:
-				// No upgrades pending, continue
+				default:
+					// No more upgrades pending, exit loop
+					break upgradeLoop
+				}
 			}
 
 			l2tx := world.GetTransform(layer2).X
