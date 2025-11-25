@@ -5828,8 +5828,12 @@ void main() {
 					ft.ActualWidth = upgrade.NewSize
 					ft.ActualHeight = upgrade.NewSize
 
-					// 3. NUCLEAR OPTION: Wait for ALL GPU work to finish
-					device.WaitIdle()
+					// 3. Wait for in-flight frames only (NOT device.WaitIdle!)
+					// CRITICAL: device.WaitIdle() triggers Windows TDR → DEVICE_LOST
+					// Instead, wait for just the frames that might be using this descriptor
+					fmt.Printf("[UPGRADE] Frame %d: Waiting for in-flight frames before descriptor update\n", upgrade.FrameIndex)
+					device.WaitForFences(inFlightFences, true, ^uint64(0))
+					fmt.Printf("[UPGRADE] Frame %d: In-flight frames complete, safe to update descriptor\n", upgrade.FrameIndex)
 
 					// 4. Update descriptor set
 					// This is safe because:
