@@ -1761,6 +1761,7 @@ type PhysicalDeviceVulkan12Features struct {
 	DescriptorIndexing                        bool
 	ShaderSampledImageArrayNonUniformIndexing bool
 	DescriptorBindingPartiallyBound           bool
+	DescriptorBindingUpdateAfterBind          bool
 	RuntimeDescriptorArray                    bool
 }
 

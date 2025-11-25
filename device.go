@@ -151,6 +151,9 @@ func (info *DeviceCreateInfo) vulkanize() *deviceCreateData {
 		if info.Vulkan12Features.DescriptorBindingPartiallyBound {
 			data.features12.descriptorBindingPartiallyBound = C.VK_TRUE
 		}
+		if info.Vulkan12Features.DescriptorBindingUpdateAfterBind {
+			data.features12.descriptorBindingSampledImageUpdateAfterBind = C.VK_TRUE
+		}
 		if info.Vulkan12Features.RuntimeDescriptorArray {
 			data.features12.runtimeDescriptorArray = C.VK_TRUE
 		}

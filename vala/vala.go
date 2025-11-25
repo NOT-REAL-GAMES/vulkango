@@ -1133,6 +1133,7 @@ func main() {
 				DescriptorIndexing:                        true, // Enable descriptor indexing for bindless textures
 				ShaderSampledImageArrayNonUniformIndexing: true, // Allow nonuniformEXT in shaders
 				DescriptorBindingPartiallyBound:           true, // Allow partially bound descriptor sets
+				DescriptorBindingUpdateAfterBind:          true, // CRITICAL: Allow updating descriptors after binding (Windows requirement)
 				RuntimeDescriptorArray:                    true, // Enable runtime-sized descriptor arrays
 			},
 			Vulkan13Features: &vk.PhysicalDeviceVulkan13Features{
@@ -5766,12 +5767,7 @@ void main() {
 					device.WaitForFences([]vk.Fence{ft.LastFence}, true, ^uint64(0))
 				}
 
-				// 2. CRITICAL: Wait for ALL in-flight frames before updating descriptor!
-				// This prevents updating the descriptor while GPU is using it in a previous frame
-				// Windows drivers are strict about this and will DEVICE_LOST if violated
-				device.WaitForFences(inFlightFences, true, ^uint64(0))
-
-				// 3. Capture old resources for garbage collection
+				// 2. Capture old resources for garbage collection
 				oldImage := ft.Image
 				oldView := ft.ImageView
 				oldMem := ft.Memory
