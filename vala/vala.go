@@ -573,10 +573,32 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Windows drivers are strict about simultaneous GPU memory operations
 var gpuMemoryMutex sync.Mutex
 
-// Queue submission mutex - prevents concurrent queue operations from multiple threads
-// CRITICAL: Windows WDDM requires serialized queue submissions
-// Without this, concurrent queue.Submit() from main loop + upgrade goroutines = DEVICE_LOST
-var queueMutex sync.Mutex
+// Queue submission serializer - ALL queue operations go through this channel
+// CRITICAL: Windows WDDM requires absolute serialization of queue submissions
+// This dedicated goroutine ensures only ONE submission happens at a time, with full visibility
+type QueueSubmission struct {
+	SubmitInfo []vk.SubmitInfo
+	Fence      vk.Fence
+	ResultChan chan error
+	Label      string // For debugging - what is being submitted
+}
+
+var queueSubmissionChannel = make(chan QueueSubmission, 10) // Buffered to avoid blocking
+var queueMutex sync.Mutex                                   // Kept for canvas compatibility
+
+// SubmitToQueue - ONLY way to submit to the Vulkan queue (replaces direct queue.Submit calls)
+// All submissions are serialized through a dedicated goroutine to prevent DEVICE_LOST
+// Exported so canvas package can use it too
+func SubmitToQueue(submitInfo []vk.SubmitInfo, fence vk.Fence, label string) error {
+	resultChan := make(chan error, 1)
+	queueSubmissionChannel <- QueueSubmission{
+		SubmitInfo: submitInfo,
+		Fence:      fence,
+		ResultChan: resultChan,
+		Label:      label,
+	}
+	return <-resultChan // Block until submission completes
+}
 
 // PendingUpgrade holds resources ready to be swapped into a frame
 // Upgrades are prepared in background goroutines, then applied on main thread
@@ -774,9 +796,7 @@ func CreateImageLayer(
 	uploadCmd.End()
 
 	// Submit and wait
-	queueMutex.Lock()
-	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
-	queueMutex.Unlock()
+	err = SubmitToQueue([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{}, "texture upload")
 	if err != nil {
 		device.DestroyImage(textureImage)
 		device.FreeMemory(textureMemory)
@@ -1159,6 +1179,23 @@ func main() {
 
 		queue := device.GetQueue(uint32(graphicsFamily), 0)
 		fmt.Printf("Got queue: %v\n", queue)
+
+		// Start queue submission serializer goroutine
+		// This goroutine is the ONLY place where queue.Submit is called
+		// All other code must use SubmitToQueue() function
+		go func() {
+			fmt.Println("[QUEUE SERIALIZER] Started - all submissions will be serialized")
+			for submission := range queueSubmissionChannel {
+				fmt.Printf("[QUEUE SERIALIZER] Submitting: %s\n", submission.Label)
+				err := queue.Submit(submission.SubmitInfo, submission.Fence)
+				if err != nil {
+					fmt.Printf("[QUEUE SERIALIZER] ERROR: %v (label: %s)\n", err, submission.Label)
+				} else {
+					fmt.Printf("[QUEUE SERIALIZER] Success: %s\n", submission.Label)
+				}
+				submission.ResultChan <- err
+			}
+		}()
 
 		// Create swapchain
 		swapchain, swapFormat, swapExtent, err := vk.CreateSwapchain(
@@ -4905,11 +4942,17 @@ void main() {
 
 			// Submit and wait for THIS upgrade only
 			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
-			queueMutex.Lock()
-			queue.Submit([]vk.SubmitInfo{
+			err = SubmitToQueue([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, fence)
-			queueMutex.Unlock()
+			}, fence, fmt.Sprintf("frame %d upgrade to %dx%d with %d mips", frameNum, nextSize, nextSize, mipLevels))
+			if err != nil {
+				fmt.Printf("[UPGRADE] Frame %d: Queue submit failed: %v\n", frameNum, err)
+				device.DestroyFence(fence)
+				device.DestroyImageView(newView)
+				device.DestroyImage(newImage)
+				device.FreeMemory(newMemory)
+				return
+			}
 			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
 
 			// Clean up fence (don't free command buffers - let pool manage them)
@@ -7804,16 +7847,14 @@ void main() {
 
 			// Submit command buffer
 			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
-			queueMutex.Lock()
-			err = queue.Submit([]vk.SubmitInfo{
+			err = SubmitToQueue([]vk.SubmitInfo{
 				{
 					WaitSemaphores:   []vk.Semaphore{imageAvailableSems[currentFrame]},
 					WaitDstStageMask: []vk.PipelineStageFlags{vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT},
 					CommandBuffers:   []vk.CommandBuffer{commandBuffers[imageIndex]},
 					SignalSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				},
-			}, inFlightFences[imageIndex])
-			queueMutex.Unlock()
+			}, inFlightFences[imageIndex], fmt.Sprintf("main render loop frame %d", currentFrame))
 			if err != nil {
 				panic(fmt.Sprintf("Queue submit failed: %v", err))
 			}
