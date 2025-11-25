@@ -553,6 +553,22 @@ type Timeline struct {
 	IsPlaying    bool    // Whether the animation is currently playing
 }
 
+// GPUGarbage holds Vulkan resources marked for deferred destruction
+// Resources cannot be destroyed immediately when replaced because they may
+// still be referenced by in-flight GPU command buffers. This struct tracks
+// when they were marked for deletion so they can be safely destroyed later.
+type GPUGarbage struct {
+	Image      vk.Image
+	ImageView  vk.ImageView
+	Memory     vk.DeviceMemory
+	DeathFrame uint64 // frameCounter when this was marked for deletion
+}
+
+// Global garbage collection queue for deferred Vulkan resource destruction
+var garbageQueue []GPUGarbage
+var garbageMutex sync.Mutex
+var frameCounter uint64 // Frame counter for garbage collection timing
+
 func LoadImage(path string) (*ImageData, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -4861,17 +4877,13 @@ void main() {
 				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
 			}
 
-			// CRITICAL: Wait for ALL GPU operations to finish before destroying resources
-			// The render loop might still be using this frame's old image in a command buffer
-			// Windows drivers catch use-after-free immediately → DEVICE_LOST
-			queue.WaitIdle()
+			// Save old resources before updating (for deferred destruction)
+			oldImage := frameTexture.Image
+			oldView := frameTexture.ImageView
+			oldMem := frameTexture.Memory
 
-			// Destroy old resources
-			device.DestroyImageView(frameTexture.ImageView)
-			device.DestroyImage(frameTexture.Image)
-			device.FreeMemory(frameTexture.Memory)
-
-			// Update frame texture with new resources
+			// Update frame texture with new resources FIRST
+			// This makes the new resources immediately available to the render loop
 			frameTexture.Image = newImage
 			frameTexture.ImageView = newView
 			frameTexture.Memory = newMemory
@@ -4897,6 +4909,18 @@ void main() {
 					}},
 				},
 			})
+
+			// Queue old resources for deferred destruction
+			// Cannot destroy immediately - they may still be referenced by in-flight command buffers
+			garbageMutex.Lock()
+			garbageQueue = append(garbageQueue, GPUGarbage{
+				Image:      oldImage,
+				ImageView:  oldView,
+				Memory:     oldMem,
+				DeathFrame: frameCounter, // Will be safely destroyed after FRAMES_IN_FLIGHT + 2 frames
+			})
+			garbageMutex.Unlock()
+			fmt.Printf("[GARBAGE] Frame %d: Queued old resources for deferred destruction (death frame: %d)\n", frameNum, frameCounter)
 
 			// Update status
 			if nextSize == 2048 {
@@ -5429,7 +5453,7 @@ void main() {
 		//currentFrameLast := 0
 
 		//imageIndexLast := uint32(0)
-		frameCounter := uint64(0) // For periodic debug logging
+		// frameCounter is now a global variable (used for garbage collection timing)
 
 		//timer := time.Now().UnixMilli()
 
@@ -5724,6 +5748,31 @@ void main() {
 			}()
 			//currentFrameLast = currentFrame
 			frameCounter++
+
+			// === GPU Garbage Collection ===
+			// Safely destroy Vulkan resources that are no longer in use by the GPU
+			// Resources are only destroyed after FRAMES_IN_FLIGHT + 2 frames have passed
+			// to guarantee all command buffers referencing them have completed execution
+			garbageMutex.Lock()
+			n := 0
+			for _, trash := range garbageQueue {
+				// If the trash is older than FRAMES_IN_FLIGHT + 2, it's safe to delete
+				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+2 {
+					device.DestroyImageView(trash.ImageView)
+					device.DestroyImage(trash.Image)
+					device.FreeMemory(trash.Memory)
+					fmt.Printf("[GARBAGE] Collected resources from death frame %d (current: %d, in-flight: %d)\n", trash.DeathFrame, frameCounter, len(inFlightFences))
+				} else {
+					// Keep it - still potentially in use
+					garbageQueue[n] = trash
+					n++
+				}
+			}
+			if n > 0 && frameCounter%60 == 0 {
+				fmt.Printf("[GARBAGE] %d items still queued (oldest death frame: %d, current frame: %d)\n", n, garbageQueue[0].DeathFrame, frameCounter)
+			}
+			garbageQueue = garbageQueue[:n]
+			garbageMutex.Unlock()
 
 			l2tx := world.GetTransform(layer2).X
 			l2ty := world.GetTransform(layer2).Y
