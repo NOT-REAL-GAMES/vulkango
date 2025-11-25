@@ -573,31 +573,34 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Windows drivers are strict about simultaneous GPU memory operations
 var gpuMemoryMutex sync.Mutex
 
-// Queue submission serializer - ALL queue operations go through this channel
-// CRITICAL: Windows WDDM requires absolute serialization of queue submissions
-// This dedicated goroutine ensures only ONE submission happens at a time, with full visibility
-type QueueSubmission struct {
-	SubmitInfo []vk.SubmitInfo
-	Fence      vk.Fence
-	ResultChan chan error
-	Label      string // For debugging - what is being submitted
+// SafeQueue wraps a Vulkan queue with mutex protection for thread-safe operations
+// CRITICAL: Vulkan queues are NOT thread-safe. Windows WDDM crashes with DEVICE_LOST
+// when multiple threads submit to the same queue simultaneously.
+// This wrapper ensures only ONE thread can submit/wait/present at a time.
+type SafeQueue struct {
+	Handle vk.Queue
+	Mutex  sync.Mutex
 }
 
-var queueSubmissionChannel = make(chan QueueSubmission, 10) // Buffered to avoid blocking
-var queueMutex sync.Mutex                                   // Kept for canvas compatibility
+// Submit wraps vkQueueSubmit with mutex protection
+func (sq *SafeQueue) Submit(submits []vk.SubmitInfo, fence vk.Fence) error {
+	sq.Mutex.Lock()
+	defer sq.Mutex.Unlock()
+	return sq.Handle.Submit(submits, fence)
+}
 
-// SubmitToQueue - ONLY way to submit to the Vulkan queue (replaces direct queue.Submit calls)
-// All submissions are serialized through a dedicated goroutine to prevent DEVICE_LOST
-// Exported so canvas package can use it too
-func SubmitToQueue(submitInfo []vk.SubmitInfo, fence vk.Fence, label string) error {
-	resultChan := make(chan error, 1)
-	queueSubmissionChannel <- QueueSubmission{
-		SubmitInfo: submitInfo,
-		Fence:      fence,
-		ResultChan: resultChan,
-		Label:      label,
-	}
-	return <-resultChan // Block until submission completes
+// WaitIdle wraps vkQueueWaitIdle with mutex protection
+func (sq *SafeQueue) WaitIdle() error {
+	sq.Mutex.Lock()
+	defer sq.Mutex.Unlock()
+	return sq.Handle.WaitIdle()
+}
+
+// Present wraps vkQueuePresentKHR with mutex protection
+func (sq *SafeQueue) Present(info *vk.PresentInfoKHR) error {
+	sq.Mutex.Lock()
+	defer sq.Mutex.Unlock()
+	return sq.Handle.PresentKHR(info)
 }
 
 // PendingUpgrade holds resources ready to be swapped into a frame
@@ -796,8 +799,8 @@ func CreateImageLayer(
 	uploadCmd.End()
 
 	// Submit and wait
-	err = SubmitToQueue([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{}, "texture upload")
-	if err != nil {
+	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
+	if err != nil{
 		device.DestroyImage(textureImage)
 		device.FreeMemory(textureMemory)
 		return 0, fmt.Errorf("failed to submit command buffer: %v", err)
@@ -956,9 +959,7 @@ func CreateImageLayer(
 	)
 	cmd.End()
 
-	queueMutex.Lock()
 	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{cmd}}}, vk.Fence{})
-	queueMutex.Unlock()
 	if err != nil {
 		return entity, fmt.Errorf("failed to submit transition command: %v", err)
 	}
@@ -1177,25 +1178,9 @@ func main() {
 
 		fmt.Println("Logical device created!")
 
-		queue := device.GetQueue(uint32(graphicsFamily), 0)
-		fmt.Printf("Got queue: %v\n", queue)
-
-		// Start queue submission serializer goroutine
-		// This goroutine is the ONLY place where queue.Submit is called
-		// All other code must use SubmitToQueue() function
-		go func() {
-			fmt.Println("[QUEUE SERIALIZER] Started - all submissions will be serialized")
-			for submission := range queueSubmissionChannel {
-				fmt.Printf("[QUEUE SERIALIZER] Submitting: %s\n", submission.Label)
-				err := queue.Submit(submission.SubmitInfo, submission.Fence)
-				if err != nil {
-					fmt.Printf("[QUEUE SERIALIZER] ERROR: %v (label: %s)\n", err, submission.Label)
-				} else {
-					fmt.Printf("[QUEUE SERIALIZER] Success: %s\n", submission.Label)
-				}
-				submission.ResultChan <- err
-			}
-		}()
+		rawQueue := device.GetQueue(uint32(graphicsFamily), 0)
+		queue := &SafeQueue{Handle: rawQueue}
+		fmt.Printf("Got queue (wrapped in SafeQueue): %v\n", rawQueue)
 
 		// Create swapchain
 		swapchain, swapFormat, swapExtent, err := vk.CreateSwapchain(
@@ -2269,7 +2254,7 @@ func main() {
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT | // Add TRANSFER_SRC for Download
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true, // SPARSE BINDING ENABLED! RTX 2000+ only
-		}, commandPool, queue, &queueMutex)
+		}, commandPool, queue.Handle, &queue.Mutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas A: %v", err))
 		}
@@ -2288,7 +2273,7 @@ func main() {
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT |
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true,
-		}, commandPool, queue, &queueMutex)
+		}, commandPool, queue.Handle, &queue.Mutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas B: %v", err))
 		}
@@ -2506,11 +2491,9 @@ void main() {
 			cmd.End()
 
 			// Submit and wait
-			queueMutex.Lock()
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, vk.Fence{})
-			queueMutex.Unlock()
 			queue.WaitIdle()
 
 			device.FreeCommandBuffers(commandPool, cmdBufs)
@@ -2776,11 +2759,9 @@ void main() {
 		uploadCmd.End()
 
 		// Submit and wait
-		queueMutex.Lock()
 		queue.Submit([]vk.SubmitInfo{
 			{CommandBuffers: []vk.CommandBuffer{uploadCmd}},
 		}, vk.Fence{})
-		queueMutex.Unlock()
 		queue.WaitIdle()
 
 		// Clean up staging buffer
@@ -2973,9 +2954,7 @@ void main() {
 		atlasUploadCmd.End()
 
 		// Submit and wait
-		queueMutex.Lock()
 		err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{atlasUploadCmd}}}, vk.Fence{})
-		queueMutex.Unlock()
 		if err != nil {
 			panic(fmt.Sprintf("Atlas upload submit failed: %v", err))
 		}
@@ -4103,11 +4082,9 @@ void main() {
 			}
 
 			fmt.Printf("[SAVE] Submitting command buffer for frame %d\n", currentFrame)
-			queueMutex.Lock()
 			err = queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
-			queueMutex.Unlock()
 			if err != nil {
 				panic(fmt.Sprintf("Failed to submit: %v", err))
 			}
@@ -4518,11 +4495,9 @@ void main() {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
 			}
 
-			queueMutex.Lock()
 			queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
 			}, fence)
-			queueMutex.Unlock()
 
 			// Wait for fence (loading must complete before proceeding)
 			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
@@ -4942,9 +4917,10 @@ void main() {
 
 			// Submit and wait for THIS upgrade only
 			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
-			err = SubmitToQueue([]vk.SubmitInfo{
+			// Lock -> Submit -> Unlock -> WaitForFences (allows main thread to keep rendering)
+			err = queue.Submit([]vk.SubmitInfo{
 				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, fence, fmt.Sprintf("frame %d upgrade to %dx%d with %d mips", frameNum, nextSize, nextSize, mipLevels))
+			}, fence)
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Queue submit failed: %v\n", frameNum, err)
 				device.DestroyFence(fence)
@@ -5425,13 +5401,11 @@ void main() {
 		transitionCmd.End()
 
 		// Submit and wait for completion
-		queueMutex.Lock()
 		err = queue.Submit([]vk.SubmitInfo{
 			{
 				CommandBuffers: []vk.CommandBuffer{transitionCmd},
 			},
 		}, vk.Fence{})
-		queueMutex.Unlock()
 		if err != nil {
 			panic(fmt.Sprintf("Failed to submit transition commands: %v", err))
 		}
@@ -5747,7 +5721,7 @@ void main() {
 								&device,
 								&physicalDevice,
 								&commandPool,
-								&queue,
+								&queue.Handle,
 								&pipeline,
 								&pipelineLayout,
 								&descriptorPool,
@@ -7847,20 +7821,20 @@ void main() {
 
 			// Submit command buffer
 			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
-			err = SubmitToQueue([]vk.SubmitInfo{
+			err = queue.Submit([]vk.SubmitInfo{
 				{
 					WaitSemaphores:   []vk.Semaphore{imageAvailableSems[currentFrame]},
 					WaitDstStageMask: []vk.PipelineStageFlags{vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT},
 					CommandBuffers:   []vk.CommandBuffer{commandBuffers[imageIndex]},
 					SignalSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				},
-			}, inFlightFences[imageIndex], fmt.Sprintf("main render loop frame %d", currentFrame))
+			}, inFlightFences[imageIndex])
 			if err != nil {
 				panic(fmt.Sprintf("Queue submit failed: %v", err))
 			}
 
 			// Present
-			queue.PresentKHR(&vk.PresentInfoKHR{
+			queue.Present(&vk.PresentInfoKHR{
 				WaitSemaphores: []vk.Semaphore{renderFinishedSems[currentFrame]},
 				Swapchains:     []vk.SwapchainKHR{swapchain},
 				ImageIndices:   []uint32{imageIndex},
