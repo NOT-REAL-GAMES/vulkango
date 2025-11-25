@@ -587,7 +587,7 @@ type PendingUpgrade struct {
 
 // Upgrade queue - background thread sends completed upgrades here
 // Main thread processes them safely (no descriptor set contention)
-var upgradeQueue = make(chan PendingUpgrade, 10)
+var upgradeQueue = make(chan PendingUpgrade) // Unbuffered: send blocks until main loop receives
 
 func LoadImage(path string) (*ImageData, error) {
 	file, err := os.Open(path)
