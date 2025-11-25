@@ -4328,7 +4328,7 @@ void main() {
 				srcHeight = frameActualHeight
 			} else {
 				// Full-res: always use mip 0 (full resolution)
-				srcWidth = frameActualWidth  // No bit shift - full resolution
+				srcWidth = frameActualWidth // No bit shift - full resolution
 				srcHeight = frameActualHeight
 			}
 
@@ -4852,6 +4852,11 @@ void main() {
 			if frameTexture.LastFence != (vk.Fence{}) {
 				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
 			}
+
+			// CRITICAL: Wait for ALL GPU operations to finish before destroying resources
+			// The render loop might still be using this frame's old image in a command buffer
+			// Windows drivers catch use-after-free immediately → DEVICE_LOST
+			queue.WaitIdle()
 
 			// Destroy old resources
 			device.DestroyImageView(frameTexture.ImageView)
@@ -5414,7 +5419,7 @@ void main() {
 		//imageIndexLast := uint32(0)
 		frameCounter := uint64(0) // For periodic debug logging
 
-		timer := time.Now().UnixMilli()
+		//timer := time.Now().UnixMilli()
 
 		go func() {
 			//for i := 0; i < 3; i++ {
@@ -7674,8 +7679,8 @@ void main() {
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
 			if frameCounter%60 == 0 { // Log every 60 frames
-				fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
-				timer = time.Now().UnixMilli()
+				//fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
+				//timer = time.Now().UnixMilli()
 			}
 
 			time.Sleep(500 * time.Microsecond) // suptid pogrommer >:(
