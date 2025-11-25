@@ -5762,21 +5762,12 @@ void main() {
 				frameTexturesMutex.Lock()
 				ft := frameTextures[upgrade.FrameIndex]
 
-				// 1. Wait for frame's LastFence (from save/load operations)
-				if ft.LastFence != (vk.Fence{}) {
-					device.WaitForFences([]vk.Fence{ft.LastFence}, true, ^uint64(0))
-				}
-
-				// 2. CRITICAL: Wait for GPU to finish ALL work before updating descriptor
-				// queue.WaitIdle() is safer than WaitForFences because it doesn't affect fence state
-				queue.WaitIdle()
-
-				// 3. Capture old resources for garbage collection
+				// 1. Capture old resources for garbage collection
 				oldImage := ft.Image
 				oldView := ft.ImageView
 				oldMem := ft.Memory
 
-				// 3. Atomic swap in Go memory
+				// 2. Atomic swap in Go memory
 				ft.Image = upgrade.NewImage
 				ft.ImageView = upgrade.NewView
 				ft.Memory = upgrade.NewMemory
