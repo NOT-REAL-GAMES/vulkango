@@ -2,6 +2,7 @@ package canvas
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	vk "github.com/NOT-REAL-GAMES/vulkango"
@@ -32,6 +33,7 @@ type SparseCanvas struct {
 	format         vk.Format
 	commandPool    vk.CommandPool
 	queue          vk.Queue
+	queueMutex     *sync.Mutex // Serializes queue submissions across all threads
 
 	// Page tracking
 	// Map from page coordinate (x,y) to memory block
@@ -50,7 +52,7 @@ type SparseCanvas struct {
 }
 
 // NewSparseCanvas creates a new sparse canvas with on-demand memory binding
-func NewSparseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (*SparseCanvas, error) {
+func NewSparseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue, queueMutex *sync.Mutex) (*SparseCanvas, error) {
 	canvas := &SparseCanvas{
 		device:         cfg.Device,
 		physicalDevice: cfg.PhysicalDevice,
@@ -59,6 +61,7 @@ func NewSparseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (*S
 		format:         cfg.Format,
 		commandPool:    commandPool,
 		queue:          queue,
+		queueMutex:     queueMutex,
 		boundPages:     make(map[uint32]vk.DeviceMemory),
 	}
 
@@ -504,9 +507,11 @@ func (c *SparseCanvas) Upload(x, y, width, height uint32, data []byte) error {
 	cmd.End()
 
 	// Submit and wait
+	c.queueMutex.Lock()
 	c.queue.Submit([]vk.SubmitInfo{
 		{CommandBuffers: []vk.CommandBuffer{cmd}},
 	}, vk.Fence{})
+	c.queueMutex.Unlock()
 	c.queue.WaitIdle()
 
 	return nil
@@ -634,9 +639,11 @@ func (c *SparseCanvas) Download(x, y, width, height uint32) ([]byte, error) {
 	cmd.End()
 
 	// Submit and wait
+	c.queueMutex.Lock()
 	c.queue.Submit([]vk.SubmitInfo{
 		{CommandBuffers: []vk.CommandBuffer{cmd}},
 	}, vk.Fence{})
+	c.queueMutex.Unlock()
 	c.queue.WaitIdle()
 
 	// Read data from staging buffer
@@ -706,9 +713,11 @@ func TransitionLayoutBatch(canvases []*SparseCanvas) error {
 	cmd.End()
 
 	// Submit and wait
+	firstCanvas.queueMutex.Lock()
 	firstCanvas.queue.Submit([]vk.SubmitInfo{
 		{CommandBuffers: []vk.CommandBuffer{cmd}},
 	}, vk.Fence{})
+	firstCanvas.queueMutex.Unlock()
 	firstCanvas.queue.WaitIdle()
 
 	return nil
@@ -925,9 +934,11 @@ func (c *SparseCanvas) Clear(x, y, width, height uint32, r, g, b, a float32) err
 	cmd.End()
 
 	// Submit and wait
+	c.queueMutex.Lock()
 	c.queue.Submit([]vk.SubmitInfo{
 		{CommandBuffers: []vk.CommandBuffer{cmd}},
 	}, vk.Fence{})
+	c.queueMutex.Unlock()
 	c.queue.WaitIdle()
 
 	return nil

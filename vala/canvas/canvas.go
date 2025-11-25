@@ -1,6 +1,8 @@
 package canvas
 
 import (
+	"sync"
+
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 )
 
@@ -146,9 +148,9 @@ func GetPagesInRect(x, y, width, height uint32) []PageCoord {
 //	           vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 //	    UseSparseBinding: false, // Use dense for now
 //	}, commandPool, queue)
-func New(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (Canvas, error) {
+func New(cfg Config, commandPool vk.CommandPool, queue vk.Queue, queueMutex *sync.Mutex) (Canvas, error) {
 	if cfg.UseSparseBinding {
-		return NewSparseCanvas(cfg, commandPool, queue)
+		return NewSparseCanvas(cfg, commandPool, queue, queueMutex)
 	}
-	return NewDenseCanvas(cfg, commandPool, queue)
+	return NewDenseCanvas(cfg, commandPool, queue, queueMutex)
 }

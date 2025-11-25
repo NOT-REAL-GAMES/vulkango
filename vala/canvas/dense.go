@@ -2,6 +2,7 @@ package canvas
 
 import (
 	"fmt"
+	"sync"
 
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 )
@@ -22,6 +23,7 @@ type DenseCanvas struct {
 	format       vk.Format
 	commandPool  vk.CommandPool
 	queue        vk.Queue
+	queueMutex   *sync.Mutex // Serializes queue submissions across all threads
 	dirtyRegions []Rect
 }
 
@@ -31,7 +33,7 @@ type Rect struct {
 }
 
 // NewDenseCanvas creates a new dense canvas with regular texture allocation
-func NewDenseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (*DenseCanvas, error) {
+func NewDenseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue, queueMutex *sync.Mutex) (*DenseCanvas, error) {
 	canvas := &DenseCanvas{
 		device:      cfg.Device,
 		pdevice:     cfg.PhysicalDevice,
@@ -40,6 +42,7 @@ func NewDenseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue) (*De
 		format:      cfg.Format,
 		commandPool: commandPool,
 		queue:       queue,
+		queueMutex:  queueMutex,
 	}
 
 	// Create image with memory (using helper function)
@@ -245,7 +248,9 @@ func (c *DenseCanvas) Upload(x, y, width, height uint32, data []byte) error {
 	submitInfo := vk.SubmitInfo{
 		CommandBuffers: []vk.CommandBuffer{cmdBuffer},
 	}
+	c.queueMutex.Lock()
 	err = c.queue.Submit([]vk.SubmitInfo{submitInfo}, vk.Fence{})
+	c.queueMutex.Unlock()
 	if err != nil {
 		return fmt.Errorf("failed to submit command buffer: %w", err)
 	}
@@ -375,7 +380,9 @@ func (c *DenseCanvas) Download(x, y, width, height uint32) ([]byte, error) {
 	submitInfo := vk.SubmitInfo{
 		CommandBuffers: []vk.CommandBuffer{cmdBuffer},
 	}
+	c.queueMutex.Lock()
 	err = c.queue.Submit([]vk.SubmitInfo{submitInfo}, vk.Fence{})
+	c.queueMutex.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("failed to submit command buffer: %w", err)
 	}
