@@ -5734,7 +5734,7 @@ void main() {
 			n := 0
 			for _, trash := range garbageQueue {
 				// If the trash is older than FRAMES_IN_FLIGHT + 2, it's safe to delete
-				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+2 {
+				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+27 {
 					// Lock GPU memory operations to prevent race with upgrade goroutine
 					gpuMemoryMutex.Lock()
 					device.DestroyImageView(trash.ImageView)
@@ -5784,8 +5784,6 @@ void main() {
 				// - We do this BEFORE recording new command buffers
 				// - Old image still valid (queued for garbage collection)
 				// - New image ready (background thread waited for blit)
-				// DIAGNOSTIC: Comment out descriptor update to test if that's the problem
-				/*
 				textureIndex := ft.TextureIndex
 				binding := textureIndex / 16384
 				arrayElement := textureIndex % 16384
@@ -5803,8 +5801,7 @@ void main() {
 						}},
 					},
 				})
-				*/
-				fmt.Printf("[DIAGNOSTIC] Skipped descriptor update for frame %d\n", upgrade.FrameIndex)
+				fmt.Printf("[DIAGNOSTIC] Updated descriptor for frame %d\n", upgrade.FrameIndex)
 
 				// 5. Queue old resources for garbage collection
 				garbageMutex.Lock()
