@@ -569,6 +569,10 @@ var garbageQueue []GPUGarbage
 var garbageMutex sync.Mutex
 var frameCounter uint64 // Frame counter for garbage collection timing
 
+// GPU memory operation mutex - prevents concurrent allocation/deallocation
+// Windows drivers are strict about simultaneous GPU memory operations
+var gpuMemoryMutex sync.Mutex
+
 func LoadImage(path string) (*ImageData, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -4532,6 +4536,10 @@ void main() {
 			// Calculate mip levels
 			mipLevels := calculateMipLevels(nextSize, nextSize)
 
+			// CRITICAL: Lock GPU memory operations to prevent race with garbage collector
+			// Windows drivers reject concurrent memory allocation/deallocation
+			gpuMemoryMutex.Lock()
+
 			// Create new larger texture
 			newImage, newMemory, err := device.CreateImageWithMemory(
 				nextSize, nextSize,
@@ -4542,11 +4550,13 @@ void main() {
 				physicalDevice,
 			)
 			if err != nil {
+				gpuMemoryMutex.Unlock()
 				fmt.Printf("[UPGRADE] Frame %d: Failed to create image: %v\n", frameNum, err)
 				return
 			}
 
 			newView, err := device.CreateImageViewForTexture(newImage, vk.FORMAT_R8G8B8A8_UNORM)
+			gpuMemoryMutex.Unlock() // Unlock after image view creation
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Failed to create image view: %v\n", frameNum, err)
 				device.DestroyImage(newImage)
@@ -5758,9 +5768,12 @@ void main() {
 			for _, trash := range garbageQueue {
 				// If the trash is older than FRAMES_IN_FLIGHT + 2, it's safe to delete
 				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+2 {
+					// Lock GPU memory operations to prevent race with upgrade goroutine
+					gpuMemoryMutex.Lock()
 					device.DestroyImageView(trash.ImageView)
 					device.DestroyImage(trash.Image)
 					device.FreeMemory(trash.Memory)
+					gpuMemoryMutex.Unlock()
 					fmt.Printf("[GARBAGE] Collected resources from death frame %d (current: %d, in-flight: %d)\n", trash.DeathFrame, frameCounter, len(inFlightFences))
 				} else {
 					// Keep it - still potentially in use
