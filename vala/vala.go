@@ -5784,6 +5784,8 @@ void main() {
 				// - We do this BEFORE recording new command buffers
 				// - Old image still valid (queued for garbage collection)
 				// - New image ready (background thread waited for blit)
+				// DIAGNOSTIC: Comment out descriptor update to test if that's the problem
+				/*
 				textureIndex := ft.TextureIndex
 				binding := textureIndex / 16384
 				arrayElement := textureIndex % 16384
@@ -5801,6 +5803,8 @@ void main() {
 						}},
 					},
 				})
+				*/
+				fmt.Printf("[DIAGNOSTIC] Skipped descriptor update for frame %d\n", upgrade.FrameIndex)
 
 				// 5. Queue old resources for garbage collection
 				garbageMutex.Lock()
