@@ -5776,6 +5776,10 @@ void main() {
 				ft.ActualWidth = upgrade.NewSize
 				ft.ActualHeight = upgrade.NewSize
 
+				// CRITICAL: Wait for all in-flight frames before updating descriptor set
+				// Windows requires this to prevent DEVICE_LOST during descriptor update
+				device.WaitForFences(inFlightFences, true, ^uint64(0))
+
 				// 4. Update descriptor set (SAFE on main thread!)
 				textureIndex := ft.TextureIndex
 				binding := textureIndex / 16384
