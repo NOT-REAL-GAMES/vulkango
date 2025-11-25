@@ -1811,6 +1811,20 @@ const (
 	DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT   DescriptorBindingFlagBits = C.VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
 )
 
+// Descriptor pool create flags
+type DescriptorPoolCreateFlagBits uint32
+
+const (
+	DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT DescriptorPoolCreateFlagBits = C.VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT
+)
+
+// Descriptor set layout create flags
+type DescriptorSetLayoutCreateFlagBits uint32
+
+const (
+	DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT DescriptorSetLayoutCreateFlagBits = C.VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
+)
+
 // Physical device properties
 type PhysicalDeviceLimits struct {
 	MaxDescriptorSetSampledImages uint32

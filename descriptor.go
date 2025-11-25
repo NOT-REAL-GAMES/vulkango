@@ -18,8 +18,9 @@ type DescriptorSet struct {
 
 // Descriptor Set Layout
 type DescriptorSetLayoutCreateInfo struct {
+	Flags         DescriptorSetLayoutCreateFlagBits // Optional: layout creation flags
 	Bindings      []DescriptorSetLayoutBinding
-	BindingFlags  []DescriptorBindingFlagBits // Optional: per-binding flags for descriptor indexing
+	BindingFlags  []DescriptorBindingFlagBits       // Optional: per-binding flags for descriptor indexing
 }
 
 type DescriptorSetLayoutBinding struct {
@@ -46,7 +47,7 @@ func (device Device) CreateDescriptorSetLayout(createInfo *DescriptorSetLayoutCr
 
 	cInfo.sType = C.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
 	cInfo.pNext = nil
-	cInfo.flags = 0
+	cInfo.flags = C.VkDescriptorSetLayoutCreateFlags(createInfo.Flags)
 
 	// Handle binding flags if provided (for descriptor indexing)
 	var bindingFlagsInfo *C.VkDescriptorSetLayoutBindingFlagsCreateInfo
@@ -101,6 +102,7 @@ func (device Device) DestroyDescriptorSetLayout(layout DescriptorSetLayout) {
 
 // Descriptor Pool
 type DescriptorPoolCreateInfo struct {
+	Flags     DescriptorPoolCreateFlagBits // Optional: pool creation flags
 	MaxSets   uint32
 	PoolSizes []DescriptorPoolSize
 }
@@ -116,7 +118,7 @@ func (device Device) CreateDescriptorPool(createInfo *DescriptorPoolCreateInfo) 
 
 	cInfo.sType = C.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
 	cInfo.pNext = nil
-	cInfo.flags = 0
+	cInfo.flags = C.VkDescriptorPoolCreateFlags(createInfo.Flags)
 	cInfo.maxSets = C.uint32_t(createInfo.MaxSets)
 
 	var poolSizes []C.VkDescriptorPoolSize

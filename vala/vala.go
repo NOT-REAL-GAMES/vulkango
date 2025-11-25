@@ -1244,6 +1244,7 @@ func main() {
 		// Create MULTI-BINDING BINDLESS descriptor set layout
 		// 8 bindings × 16K textures = 131K total texture capacity
 		descriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Flags: vk.DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
@@ -1295,14 +1296,14 @@ func main() {
 				},
 			},
 			BindingFlags: []vk.DescriptorBindingFlagBits{
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 0
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 1
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 2
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 3
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 4
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 5
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 6
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 7
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 0
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 1
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 2
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 3
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 4
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 5
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 6
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 7
 			},
 		})
 		if err != nil {
@@ -1419,6 +1420,7 @@ func main() {
 		// Create composite descriptor set layout (MULTI-BINDING BINDLESS!)
 		// 8 bindings × 16K textures = 131K total texture capacity
 		compositeDescriptorSetLayout, err := device.CreateDescriptorSetLayout(&vk.DescriptorSetLayoutCreateInfo{
+			Flags: vk.DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
 			Bindings: []vk.DescriptorSetLayoutBinding{
 				{
 					Binding:         0,
@@ -1470,14 +1472,14 @@ func main() {
 				},
 			},
 			BindingFlags: []vk.DescriptorBindingFlagBits{
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 0
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 1
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 2
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 3
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 4
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 5
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 6
-				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // Binding 7
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 0
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 1
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 2
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 3
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 4
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 5
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 6
+				vk.DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | vk.DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // Binding 7
 			},
 		})
 		if err != nil {
@@ -2017,6 +2019,7 @@ func main() {
 		fmt.Printf("Creating multi-binding bindless descriptor pool:\n")
 		fmt.Printf("  - %d bindings × %d textures = %d total capacity\n", numBindings, texturesPerBinding, totalTextureCapacity)
 		bindlessDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
+			Flags:   vk.DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
 			MaxSets: 1, // Only ONE descriptor set needed for bindless!
 			PoolSizes: []vk.DescriptorPoolSize{
 				{Type: vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, DescriptorCount: uint32(totalTextureCapacity)},
