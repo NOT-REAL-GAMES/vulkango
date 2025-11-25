@@ -4252,6 +4252,8 @@ void main() {
 			frameIsLowRes := frameTexture.IsLowRes
 			frameActualWidth := frameTexture.ActualWidth
 			frameActualHeight := frameTexture.ActualHeight
+			frameMipLevels := frameTexture.MipLevels
+			frameCurrentMip := frameTexture.CurrentMip
 			frameTexture.Mutex.Unlock()
 			// Copy frameTexture to paintCanvas
 			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -4315,24 +4317,30 @@ void main() {
 
 			// Copy frameTexture to paintCanvas
 			// RAGE: Use current mip level for faster loading (starts at mip 4 = 128×128, then streams to mip 0 = 2048×2048)
-			// CRITICAL: Always load from mip 0 (full resolution) for frame switching
-			// RAGE streaming uses CurrentMip for progressive loading, but frame switching
-			// needs the saved full-res data to show strokes correctly
-			const loadMip = 0
+			currentMip := frameCurrentMip
+			if currentMip > int(frameMipLevels)-1 {
+				currentMip = int(frameMipLevels) - 1 // Clamp to available mips
+			}
 
-			// Calculate source dimensions - always use full resolution (mip 0)
+			// Calculate source dimensions based on mip level
 			var srcWidth, srcHeight uint32
 			if frameIsLowRes {
 				// Low-res proxy: no mipmaps, just use actual dimensions
 				srcWidth = frameActualWidth
 				srcHeight = frameActualHeight
 			} else {
-				// Full-res: always use mip 0 (full resolution)
-				srcWidth = frameActualWidth // No bit shift - full resolution
-				srcHeight = frameActualHeight
+				// Full-res with mipmaps: calculate mip dimensions
+				srcWidth = frameActualWidth >> uint32(currentMip)
+				srcHeight = frameActualHeight >> uint32(currentMip)
+				if srcWidth == 0 {
+					srcWidth = 1
+				}
+				if srcHeight == 0 {
+					srcHeight = 1
+				}
 			}
 
-			fmt.Printf("[BLIT] Copying frame %d from mip %d (%dx%d) to paintCanvas (2048×2048)\n", frameNum, loadMip, srcWidth, srcHeight)
+			fmt.Printf("[BLIT] Copying frame %d from mip %d (%dx%d) to paintCanvas (2048×2048)\n", frameNum, currentMip, srcWidth, srcHeight)
 
 			cmd.CmdBlitImage(
 				frameTexture.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -4340,7 +4348,7 @@ void main() {
 				[]vk.ImageBlit{{
 					SrcSubresource: vk.ImageSubresourceLayers{
 						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
-						MipLevel:       loadMip, // Always use mip 0 for frame switching
+						MipLevel:       uint32(currentMip), // RAGE: Use current mip for progressive loading
 						BaseArrayLayer: 0,
 						LayerCount:     1,
 					},
@@ -5008,12 +5016,16 @@ void main() {
 			})
 
 			// Check if this frame needs replay (after upgrade or if actions were added)
+			// CRITICAL: Always replay frames with strokes, even if NeedsReplay=false
+			// This ensures strokes appear even when loading from low-res mips (RAGE streaming)
 			frameTexturesMutex.RLock()
 			needsReplay := frameTextures[newFrame] != nil && frameTextures[newFrame].NeedsReplay
 			frameTexturesMutex.RUnlock()
 
-			if needsReplay {
-				fmt.Printf("[REPLAY] Frame %d needs replay - triggering action replay\n", newFrame)
+			hasStrokes := frameActions[newFrame] != nil && len(frameActions[newFrame].GetHistory()) > 0
+
+			if needsReplay || hasStrokes {
+				fmt.Printf("[REPLAY] Frame %d needs replay (NeedsReplay=%v, hasStrokes=%v)\n", newFrame, needsReplay, hasStrokes)
 				// NOTE: NeedsReplay flag will be cleared AFTER replay completes (not here)
 				// This prevents race conditions where frame switches before replay executes
 				replayRequested = true // Trigger replay in next render loop
