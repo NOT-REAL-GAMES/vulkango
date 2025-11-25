@@ -5767,7 +5767,11 @@ void main() {
 					device.WaitForFences([]vk.Fence{ft.LastFence}, true, ^uint64(0))
 				}
 
-				// 2. Capture old resources for garbage collection
+				// 2. CRITICAL: Wait for GPU to finish ALL work before updating descriptor
+				// queue.WaitIdle() is safer than WaitForFences because it doesn't affect fence state
+				queue.WaitIdle()
+
+				// 3. Capture old resources for garbage collection
 				oldImage := ft.Image
 				oldView := ft.ImageView
 				oldMem := ft.Memory
