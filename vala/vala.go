@@ -573,43 +573,170 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Windows drivers are strict about simultaneous GPU memory operations
 var gpuMemoryMutex sync.Mutex
 
-// SafeQueue wraps a Vulkan queue with mutex protection for thread-safe operations
-// CRITICAL: Vulkan queues are NOT thread-safe. Windows WDDM crashes with DEVICE_LOST
-// when multiple threads submit to the same queue simultaneously.
-// This wrapper ensures only ONE thread can submit/wait/present at a time.
+// GLOBAL VULKAN SERIALIZATION MUTEX
+// CRITICAL: On Windows WDDM, MOST Vulkan operations are NOT thread-safe
+// This mutex serializes ALL operations that could race:
+// - Queue operations (submit, wait, present)
+// - Descriptor set updates
+// - Resource creation/destruction
+// - Memory allocation/deallocation
+// - Command buffer/pool operations
+// - Device synchronization (fences, waits)
+var vkMutex sync.Mutex
+
+// SafeQueue wraps a Vulkan queue using the GLOBAL vkMutex for serialization
+// CRITICAL: Uses vkMutex to serialize with ALL other Vulkan operations
 type SafeQueue struct {
 	Handle vk.Queue
-	Mutex  sync.Mutex
 }
 
-// Submit wraps vkQueueSubmit with mutex protection
+// Submit wraps vkQueueSubmit with GLOBAL mutex protection
 func (sq *SafeQueue) Submit(submits []vk.SubmitInfo, fence vk.Fence) error {
-	fmt.Printf("[SAFE QUEUE] Submit called - acquiring lock...\n")
-	sq.Mutex.Lock()
-	fmt.Printf("[SAFE QUEUE] Lock acquired, submitting...\n")
+	fmt.Printf("[VK LOCK] Submit - acquiring global lock...\n")
+	vkMutex.Lock()
+	fmt.Printf("[VK LOCK] Submit - acquired, executing...\n")
 	defer func() {
-		sq.Mutex.Unlock()
-		fmt.Printf("[SAFE QUEUE] Lock released\n")
+		vkMutex.Unlock()
+		fmt.Printf("[VK LOCK] Submit - released\n")
 	}()
 	err := sq.Handle.Submit(submits, fence)
 	if err != nil {
-		fmt.Printf("[SAFE QUEUE] ERROR: %v\n", err)
+		fmt.Printf("[VK LOCK] Submit - ERROR: %v\n", err)
 	}
 	return err
 }
 
-// WaitIdle wraps vkQueueWaitIdle with mutex protection
+// WaitIdle wraps vkQueueWaitIdle with GLOBAL mutex protection
 func (sq *SafeQueue) WaitIdle() error {
-	sq.Mutex.Lock()
-	defer sq.Mutex.Unlock()
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
 	return sq.Handle.WaitIdle()
 }
 
-// Present wraps vkQueuePresentKHR with mutex protection
+// Present wraps vkQueuePresentKHR with GLOBAL mutex protection
 func (sq *SafeQueue) Present(info *vk.PresentInfoKHR) error {
-	sq.Mutex.Lock()
-	defer sq.Mutex.Unlock()
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
 	return sq.Handle.PresentKHR(info)
+}
+
+// === GLOBAL VULKAN OPERATION WRAPPERS ===
+// These functions wrap non-thread-safe Vulkan operations with vkMutex
+// Accept interface{} for device to handle both vk.Device and *vk.Device
+
+// VkUpdateDescriptorSets wraps device.UpdateDescriptorSets with global lock
+func VkUpdateDescriptorSets(dev interface{}, writes []vk.WriteDescriptorSet) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		device.UpdateDescriptorSets(writes)
+	} else if device, ok := dev.(*vk.Device); ok {
+		device.UpdateDescriptorSets(writes)
+	}
+}
+
+// VkWaitForFences wraps device.WaitForFences with global lock
+func VkWaitForFences(dev interface{}, fences []vk.Fence, waitAll bool, timeout uint64) error {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		return device.WaitForFences(fences, waitAll, timeout)
+	} else if device, ok := dev.(*vk.Device); ok {
+		return device.WaitForFences(fences, waitAll, timeout)
+	}
+	return nil
+}
+
+// VkResetFences wraps device.ResetFences with global lock
+func VkResetFences(dev interface{}, fences []vk.Fence) error {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		return device.ResetFences(fences)
+	} else if device, ok := dev.(*vk.Device); ok {
+		return device.ResetFences(fences)
+	}
+	return nil
+}
+
+// VkCreateFence wraps device.CreateFence with global lock
+func VkCreateFence(dev interface{}, info *vk.FenceCreateInfo) (vk.Fence, error) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		return device.CreateFence(info)
+	} else if device, ok := dev.(*vk.Device); ok {
+		return device.CreateFence(info)
+	}
+	return vk.Fence{}, nil
+}
+
+// VkDestroyFence wraps device.DestroyFence with global lock
+func VkDestroyFence(dev interface{}, fence vk.Fence) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		device.DestroyFence(fence)
+	} else if device, ok := dev.(*vk.Device); ok {
+		device.DestroyFence(fence)
+	}
+}
+
+// VkCreateImage wraps device.CreateImage with global lock
+func VkCreateImage(dev interface{}, info *vk.ImageCreateInfo) (vk.Image, error) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		return device.CreateImage(info)
+	} else if device, ok := dev.(*vk.Device); ok {
+		return device.CreateImage(info)
+	}
+	return vk.Image{}, nil
+}
+
+// VkDestroyImage wraps device.DestroyImage with global lock
+func VkDestroyImage(dev interface{}, image vk.Image) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		device.DestroyImage(image)
+	} else if device, ok := dev.(*vk.Device); ok {
+		device.DestroyImage(image)
+	}
+}
+
+// VkAllocateMemory wraps device.AllocateMemory with global lock
+func VkAllocateMemory(dev interface{}, info *vk.MemoryAllocateInfo) (vk.DeviceMemory, error) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		return device.AllocateMemory(info)
+	} else if device, ok := dev.(*vk.Device); ok {
+		return device.AllocateMemory(info)
+	}
+	return vk.DeviceMemory{}, nil
+}
+
+// VkFreeMemory wraps device.FreeMemory with global lock
+func VkFreeMemory(dev interface{}, memory vk.DeviceMemory) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		device.FreeMemory(memory)
+	} else if device, ok := dev.(*vk.Device); ok {
+		device.FreeMemory(memory)
+	}
+}
+
+// VkDestroyImageView wraps device.DestroyImageView with global lock
+func VkDestroyImageView(dev interface{}, view vk.ImageView) {
+	vkMutex.Lock()
+	defer vkMutex.Unlock()
+	if device, ok := dev.(vk.Device); ok {
+		device.DestroyImageView(view)
+	} else if device, ok := dev.(*vk.Device); ok {
+		device.DestroyImageView(view)
+	}
 }
 
 // PendingUpgrade holds resources ready to be swapped into a frame
@@ -705,7 +832,7 @@ func CreateImageLayer(
 		return 0, fmt.Errorf("failed to create staging buffer: %v", err)
 	}
 	defer device.DestroyBuffer(stagingBuffer)
-	defer device.FreeMemory(stagingMemory)
+	defer VkFreeMemory(device, stagingMemory)
 
 	// Upload texture data to staging buffer
 	err = device.UploadToBuffer(stagingMemory, textureData)
@@ -733,8 +860,8 @@ func CreateImageLayer(
 		CommandBufferCount: 1,
 	})
 	if err != nil {
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to allocate command buffer: %v", err)
 	}
 	uploadCmd := uploadCmdBuffer[0]
@@ -810,8 +937,8 @@ func CreateImageLayer(
 	// Submit and wait
 	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
 	if err != nil{
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to submit command buffer: %v", err)
 	}
 	queue.WaitIdle()
@@ -831,8 +958,8 @@ func CreateImageLayer(
 		},
 	})
 	if err != nil {
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to create image view: %v", err)
 	}
 
@@ -848,9 +975,9 @@ func CreateImageLayer(
 		MipmapMode:       vk.SAMPLER_MIPMAP_MODE_LINEAR,
 	})
 	if err != nil {
-		device.DestroyImageView(textureImageView)
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImageView(device, textureImageView)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to create sampler: %v", err)
 	}
 
@@ -895,9 +1022,9 @@ func CreateImageLayer(
 	if err != nil {
 		// Clean up already-created resources
 		device.DestroySampler(textureSampler)
-		device.DestroyImageView(textureImageView)
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImageView(device, textureImageView)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to create layer framebuffer: %v", err)
 	}
 
@@ -914,12 +1041,12 @@ func CreateImageLayer(
 		},
 	})
 	if err != nil {
-		device.DestroyImage(layerImage)
-		device.FreeMemory(layerImageMemory)
+		VkDestroyImage(device, layerImage)
+		VkFreeMemory(device, layerImageMemory)
 		device.DestroySampler(textureSampler)
-		device.DestroyImageView(textureImageView)
-		device.DestroyImage(textureImage)
-		device.FreeMemory(textureMemory)
+		VkDestroyImageView(device, textureImageView)
+		VkDestroyImage(device, textureImage)
+		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to create layer framebuffer view: %v", err)
 	}
 
@@ -989,7 +1116,7 @@ func CreateImageLayer(
 	const texturesPerBinding = 16384
 	binding := textureIndex / texturesPerBinding
 	arrayElement := textureIndex % texturesPerBinding
-	device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+	VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 		{
 			DstSet:          globalBindlessDescriptorSet,
 			DstBinding:      binding,
@@ -1221,7 +1348,7 @@ func main() {
 		}
 		defer func() {
 			for _, view := range swapImageViews {
-				device.DestroyImageView(view)
+				VkDestroyImageView(device, view)
 			}
 		}()
 
@@ -2129,7 +2256,7 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(vertexBuffer)
-		defer device.FreeMemory(vertexMemory)
+		defer VkFreeMemory(device, vertexMemory)
 
 		// Upload vertex data
 		vertexData := (*[1 << 30]byte)(unsafe.Pointer(&vertices[0]))[:vertexBufferSize:vertexBufferSize]
@@ -2150,7 +2277,7 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(indexBuffer)
-		defer device.FreeMemory(indexMemory)
+		defer VkFreeMemory(device, indexMemory)
 
 		// Upload index data
 		indexData := (*[1 << 30]byte)(unsafe.Pointer(&indices[0]))[:indexBufferSize:indexBufferSize]
@@ -2182,7 +2309,7 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(brushVertexBuffer)
-		defer device.FreeMemory(brushVertexMemory)
+		defer VkFreeMemory(device, brushVertexMemory)
 
 		// Upload brush vertex data
 		brushVertexData := (*[1 << 30]byte)(unsafe.Pointer(&brushVertices[0]))[:brushVertexBufferSize:brushVertexBufferSize]
@@ -2215,7 +2342,7 @@ func main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(colorPickerVertexBuffer)
-		defer device.FreeMemory(colorPickerVertexMemory)
+		defer VkFreeMemory(device, colorPickerVertexMemory)
 
 		// Upload color picker vertex data
 		colorPickerVertexData := (*[1 << 30]byte)(unsafe.Pointer(&colorPickerVertices[0]))[:colorPickerVertexBufferSize:colorPickerVertexBufferSize]
@@ -2263,7 +2390,7 @@ func main() {
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT | // Add TRANSFER_SRC for Download
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true, // SPARSE BINDING ENABLED! RTX 2000+ only
-		}, commandPool, queue.Handle, &queue.Mutex)
+		}, commandPool, queue.Handle, &vkMutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas A: %v", err))
 		}
@@ -2282,7 +2409,7 @@ func main() {
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT |
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
 			UseSparseBinding: true,
-		}, commandPool, queue.Handle, &queue.Mutex)
+		}, commandPool, queue.Handle, &vkMutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas B: %v", err))
 		}
@@ -2402,7 +2529,7 @@ void main() {
 			descSet := descSets[0]
 
 			// Update descriptor set to bind canvas image
-			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 				{
 					DstSet:         descSet,
 					DstBinding:     0,
@@ -2576,14 +2703,14 @@ void main() {
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create snapshot image %d: %v", i, err))
 			}
-			defer device.DestroyImage(snapImage)
-			defer device.FreeMemory(snapMem)
+			defer VkDestroyImage(device, snapImage)
+			defer VkFreeMemory(device, snapMem)
 
 			snapView, err := device.CreateImageViewForTexture(snapImage, vk.FORMAT_R8G8B8A8_UNORM)
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create snapshot image view %d: %v", i, err))
 			}
-			defer device.DestroyImageView(snapView)
+			defer VkDestroyImageView(device, snapView)
 
 			snapshots[i] = CanvasSnapshot{
 				Image:       snapImage,
@@ -2614,7 +2741,7 @@ void main() {
 
 		// Update brush descriptor set to bind source canvas texture
 		// This will be updated each frame to bind the correct source canvas
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          brushDescriptorSet,
 				DstBinding:      0,
@@ -2679,8 +2806,8 @@ void main() {
 		if err != nil {
 			panic(err)
 		}
-		defer device.DestroyImage(textureImage)
-		defer device.FreeMemory(textureMemory)
+		defer VkDestroyImage(device, textureImage)
+		defer VkFreeMemory(device, textureMemory)
 
 		// Create command buffer for texture upload
 		uploadCmdBuffer, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
@@ -2775,14 +2902,14 @@ void main() {
 
 		// Clean up staging buffer
 		device.DestroyBuffer(stagingBuffer)
-		device.FreeMemory(stagingMemory)
+		VkFreeMemory(device, stagingMemory)
 
 		// Create texture image view
 		textureImageView, err := device.CreateImageViewForTexture(textureImage, vk.FORMAT_R8G8B8A8_SRGB)
 		if err != nil {
 			panic(err)
 		}
-		defer device.DestroyImageView(textureImageView)
+		defer VkDestroyImageView(device, textureImageView)
 
 		// Create sampler
 		textureSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
@@ -2833,7 +2960,7 @@ void main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(textAtlasStaging)
-		defer device.FreeMemory(textAtlasStagingMemory)
+		defer VkFreeMemory(device, textAtlasStagingMemory)
 
 		// Upload atlas data to staging buffer
 		err = device.UploadToBuffer(textAtlasStagingMemory, sdfAtlas.Pixels)
@@ -2854,15 +2981,15 @@ void main() {
 		if err != nil {
 			panic(err)
 		}
-		defer device.DestroyImage(textAtlasImage)
-		defer device.FreeMemory(textAtlasMemory)
+		defer VkDestroyImage(device, textAtlasImage)
+		defer VkFreeMemory(device, textAtlasMemory)
 
 		// Create image view for atlas
 		textAtlasImageView, err := device.CreateImageViewForTexture(textAtlasImage, vk.FORMAT_R8_UNORM)
 		if err != nil {
 			panic(err)
 		}
-		defer device.DestroyImageView(textAtlasImageView)
+		defer VkDestroyImageView(device, textAtlasImageView)
 
 		// Create sampler for text atlas
 		textAtlasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
@@ -3117,7 +3244,7 @@ void main() {
 		textDescriptorSet := textDescriptorSets[0]
 
 		// Update descriptor set with SDF atlas texture
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          textDescriptorSet,
 				DstBinding:      0,
@@ -3151,7 +3278,7 @@ void main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(textVertexBuffer)
-		defer device.FreeMemory(textVertexMemory)
+		defer VkFreeMemory(device, textVertexMemory)
 
 		textIndexBuffer, textIndexMemory, err := device.CreateBufferWithMemory(
 			textIndexBufferSize,
@@ -3163,7 +3290,7 @@ void main() {
 			panic(err)
 		}
 		defer device.DestroyBuffer(textIndexBuffer)
-		defer device.FreeMemory(textIndexMemory)
+		defer VkFreeMemory(device, textIndexMemory)
 
 		// Create per-frame, per-usage staging buffers (CPU-writable, for uploading data)
 		// 2D array: [bufferSetIndex][frameIndex]
@@ -3195,7 +3322,7 @@ void main() {
 				textStagingVertexBuffers[set][i] = vertexBuf
 				textStagingVertexMemories[set][i] = vertexMem
 				defer device.DestroyBuffer(vertexBuf)
-				defer device.FreeMemory(vertexMem)
+				defer VkFreeMemory(device, vertexMem)
 
 				indexBuf, indexMem, err := device.CreateBufferWithMemory(
 					textIndexBufferSize,
@@ -3209,7 +3336,7 @@ void main() {
 				textStagingIndexBuffers[set][i] = indexBuf
 				textStagingIndexMemories[set][i] = indexMem
 				defer device.DestroyBuffer(indexBuf)
-				defer device.FreeMemory(indexMem)
+				defer VkFreeMemory(device, indexMem)
 			}
 		}
 		fmt.Printf("Created %d buffer sets x %d frames = %d total text staging buffer sets\n", numBufferSets, numFrames, numBufferSets*numFrames)
@@ -3286,13 +3413,13 @@ void main() {
 
 		inFlightFences := make([]vk.Fence, len(swapImages))
 		for i := range inFlightFences {
-			inFlightFences[i], err = device.CreateFence(&vk.FenceCreateInfo{
+			inFlightFences[i], err = VkCreateFence(device, &vk.FenceCreateInfo{
 				Flags: vk.FENCE_CREATE_SIGNALED_BIT,
 			})
 			if err != nil {
 				panic(err)
 			}
-			defer device.DestroyFence(inFlightFences[i])
+			defer VkDestroyFence(device, inFlightFences[i])
 		}
 
 		fmt.Println("Command buffers and sync objects created!")
@@ -3339,7 +3466,7 @@ void main() {
 		// Calculate which binding and array index to use for multi-binding architecture
 		binding1 := layer1TextureIndex / texturesPerBinding
 		arrayElement1 := layer1TextureIndex % texturesPerBinding
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
 				DstBinding:      binding1,
@@ -3381,8 +3508,8 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create layer 1 framebuffer image: %v", err))
 		}
-		defer device.DestroyImage(layer1Image)
-		defer device.FreeMemory(layer1ImageMemory)
+		defer VkDestroyImage(device, layer1Image)
+		defer VkFreeMemory(device, layer1ImageMemory)
 
 		layer1ImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
 			Image:    layer1Image,
@@ -3399,7 +3526,7 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create layer 1 image view: %v", err))
 		}
-		defer device.DestroyImageView(layer1ImageView)
+		defer VkDestroyImageView(device, layer1ImageView)
 
 		// Add RenderTarget component for layer 1
 		world.AddRenderTarget(layer1, &ecs.RenderTarget{
@@ -3434,8 +3561,8 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create background layer framebuffer image: %v", err))
 		}
-		defer device.DestroyImage(layerBgImage)
-		defer device.FreeMemory(layerBgImageMemory)
+		defer VkDestroyImage(device, layerBgImage)
+		defer VkFreeMemory(device, layerBgImageMemory)
 
 		layerBgImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
 			Image:    layerBgImage,
@@ -3452,7 +3579,7 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create background layer image view: %v", err))
 		}
-		defer device.DestroyImageView(layerBgImageView)
+		defer VkDestroyImageView(device, layerBgImageView)
 
 		// Add RenderTarget component for background layer
 		world.AddRenderTarget(layerBg, &ecs.RenderTarget{
@@ -3471,7 +3598,7 @@ void main() {
 		// Upload background layer framebuffer to global bindless descriptor set
 		bindingBg := layerBgTextureIndex / texturesPerBinding
 		arrayElementBg := layerBgTextureIndex % texturesPerBinding
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
 				DstBinding:      bindingBg,
@@ -3536,7 +3663,7 @@ void main() {
 		// Calculate which binding and array index to use for multi-binding architecture
 		binding2 := layer2TextureIndex / texturesPerBinding
 		arrayElement2 := layer2TextureIndex % texturesPerBinding
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
 				DstBinding:      binding2,
@@ -3579,8 +3706,8 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create layer 2 framebuffer image: %v", err))
 		}
-		defer device.DestroyImage(layer2Image)
-		defer device.FreeMemory(layer2ImageMemory)
+		defer VkDestroyImage(device, layer2Image)
+		defer VkFreeMemory(device, layer2ImageMemory)
 
 		layer2ImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
 			Image:    layer2Image,
@@ -3597,7 +3724,7 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create layer 2 image view: %v", err))
 		}
-		defer device.DestroyImageView(layer2ImageView)
+		defer VkDestroyImageView(device, layer2ImageView)
 
 		// Add RenderTarget component for layer 2
 		world.AddRenderTarget(layer2, &ecs.RenderTarget{
@@ -3638,8 +3765,8 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create group framebuffer image: %v", err))
 		}
-		defer device.DestroyImage(groupImage)
-		defer device.FreeMemory(groupImageMemory)
+		defer VkDestroyImage(device, groupImage)
+		defer VkFreeMemory(device, groupImageMemory)
 
 		groupImageView, err := device.CreateImageView(&vk.ImageViewCreateInfo{
 			Image:    groupImage,
@@ -3656,7 +3783,7 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create group image view: %v", err))
 		}
-		defer device.DestroyImageView(groupImageView)
+		defer VkDestroyImageView(device, groupImageView)
 
 		// Add RenderTarget for the group
 		world.AddRenderTarget(testGroup, &ecs.RenderTarget{
@@ -3675,7 +3802,7 @@ void main() {
 		// Upload group framebuffer to global bindless descriptor set
 		bindingGroup := groupTextureIndex / texturesPerBinding
 		arrayElementGroup := groupTextureIndex % texturesPerBinding
-		device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+		VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 			{
 				DstSet:          globalBindlessDescriptorSet,
 				DstBinding:      bindingGroup,
@@ -4085,7 +4212,7 @@ void main() {
 
 			// Create fence for per-frame synchronization (for fast frame switching)
 			fmt.Printf("[SAVE] Creating fence for frame %d\n", currentFrame)
-			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+			fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
 			}
@@ -4102,7 +4229,7 @@ void main() {
 			// Otherwise main render loop will use paintCanvas while GPU is still reading it
 			fmt.Printf("[SAVE] Waiting for fence for frame %d...\n", currentFrame)
 			time.Sleep(5 * time.Millisecond)
-			err = device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			err = VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
 			if err != nil {
 				panic(fmt.Sprintf("Failed to wait for fence: %v", err))
 			}
@@ -4113,7 +4240,7 @@ void main() {
 			// Lock to update LastFence
 			frameTexture.Mutex.Lock()
 			if frameTexture.LastFence != (vk.Fence{}) {
-				device.DestroyFence(frameTexture.LastFence)
+				VkDestroyFence(device, frameTexture.LastFence)
 			}
 			frameTexture.LastFence = fence
 
@@ -4268,7 +4395,7 @@ void main() {
 				cmd.End()
 
 				// Create fence for synchronization
-				fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+				fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
 				if err != nil {
 					panic(fmt.Sprintf("Failed to create fence: %v", err))
 				}
@@ -4278,8 +4405,8 @@ void main() {
 				}, fence)
 
 				// Wait for fence, then clean up
-				device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
-				device.DestroyFence(fence)
+				VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
+				VkDestroyFence(device, fence)
 				device.FreeCommandBuffers(commandPool, cmdBufs)
 
 				frameTextures[frameNum] = &FrameTexture{
@@ -4299,7 +4426,7 @@ void main() {
 				const texturesPerBinding = 16384
 				binding := newTextureIndex / texturesPerBinding
 				arrayElement := newTextureIndex % texturesPerBinding
-				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 					{
 						DstSet:          globalBindlessDescriptorSet,
 						DstBinding:      binding,
@@ -4499,7 +4626,7 @@ void main() {
 			cmd.End()
 
 			// Create fence for per-frame synchronization
-			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+			fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
 			if err != nil {
 				panic(fmt.Sprintf("Failed to create fence: %v", err))
 			}
@@ -4509,13 +4636,13 @@ void main() {
 			}, fence)
 
 			// Wait for fence (loading must complete before proceeding)
-			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
 
 			// Store fence for this frame's load operation
 			// Even though we waited, future frame switches will check this fence
 			// Destroy old fence if it exists
 			if frameTexture.LastFence != (vk.Fence{}) {
-				device.DestroyFence(frameTexture.LastFence)
+				VkDestroyFence(device, frameTexture.LastFence)
 			}
 			frameTexture.LastFence = fence
 
@@ -4619,8 +4746,8 @@ void main() {
 			gpuMemoryMutex.Unlock() // Unlock after image view creation
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Failed to create image view: %v\n", frameNum, err)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				VkDestroyImage(device, newImage)
+				VkFreeMemory(device, newMemory)
 				return
 			}
 
@@ -4628,7 +4755,7 @@ void main() {
 			// This ensures any ongoing save/load operation completes first
 			frameTexture.Mutex.Lock()
 			if frameTexture.LastFence != (vk.Fence{}) {
-				device.WaitForFences([]vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
+				VkWaitForFences(device, []vk.Fence{frameTexture.LastFence}, true, ^uint64(0))
 			}
 			frameTexture.Mutex.Unlock()
 
@@ -4640,9 +4767,9 @@ void main() {
 			})
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Failed to allocate command buffers: %v\n", frameNum, err)
-				device.DestroyImageView(newView)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				VkDestroyImageView(device, newView)
+				VkDestroyImage(device, newImage)
+				VkFreeMemory(device, newMemory)
 				return
 			}
 			cmd := cmdBufs[0]
@@ -4915,12 +5042,12 @@ void main() {
 			cmd.End()
 
 			// Create fence for this upgrade operation
-			fence, err := device.CreateFence(&vk.FenceCreateInfo{})
+			fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Failed to create fence: %v\n", frameNum, err)
-				device.DestroyImageView(newView)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				VkDestroyImageView(device, newView)
+				VkDestroyImage(device, newImage)
+				VkFreeMemory(device, newMemory)
 				return
 			}
 
@@ -4932,16 +5059,16 @@ void main() {
 			}, fence)
 			if err != nil {
 				fmt.Printf("[UPGRADE] Frame %d: Queue submit failed: %v\n", frameNum, err)
-				device.DestroyFence(fence)
-				device.DestroyImageView(newView)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				VkDestroyFence(device, fence)
+				VkDestroyImageView(device, newView)
+				VkDestroyImage(device, newImage)
+				VkFreeMemory(device, newMemory)
 				return
 			}
-			device.WaitForFences([]vk.Fence{fence}, true, ^uint64(0))
+			VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
 
 			// Clean up fence (don't free command buffers - let pool manage them)
-			device.DestroyFence(fence)
+			VkDestroyFence(device, fence)
 
 			// Verify frame still exists
 			frameTexturesMutex.RLock()
@@ -4950,9 +5077,9 @@ void main() {
 
 			if !stillExists {
 				fmt.Printf("[UPGRADE] Frame %d: Deleted during upgrade, cleaning up\n", frameNum)
-				device.DestroyImageView(newView)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				VkDestroyImageView(device, newView)
+				VkDestroyImage(device, newImage)
+				VkFreeMemory(device, newMemory)
 				return
 			}
 
@@ -5012,7 +5139,7 @@ void main() {
 			if oldFrameTexture := frameTextures[oldFrame]; oldFrameTexture != nil && oldFrameTexture.LastFence != (vk.Fence{}) {
 				fmt.Printf("[SWITCH] Waiting for frame %d's fence...\n", oldFrame)
 				time.Sleep(1 * time.Millisecond) // Still needed to prevent hangs
-				err := device.WaitForFences([]vk.Fence{oldFrameTexture.LastFence}, true, ^uint64(0))
+				err := VkWaitForFences(device, []vk.Fence{oldFrameTexture.LastFence}, true, ^uint64(0))
 				if err != nil {
 					panic(fmt.Sprintf("Failed to wait for frame %d fence: %v", oldFrame, err))
 				}
@@ -5050,7 +5177,7 @@ void main() {
 
 			// CRITICAL: Update brush descriptor set to point to the newly-loaded canvas
 			// Without this, the GPU shader reads from stale descriptor bindings and displays the old frame
-			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 				{
 					DstSet:          brushDescriptorSet,
 					DstBinding:      0,
@@ -5263,7 +5390,7 @@ void main() {
 			arrayElement := textureIndex % texturesPerBinding
 
 			// Upload to global bindless descriptor set
-			device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+			VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 				{
 					DstSet:          globalBindlessDescriptorSet,
 					DstBinding:      binding,
@@ -5298,26 +5425,26 @@ void main() {
 		// === Create UI Layers (Multi-Layer Architecture) ===
 		// Create button base layer (renders button rectangles)
 		uiButtonBaseLayer, uiButtonBaseImage, uiButtonBaseView, uiButtonBaseMem := createUILayer("ButtonBase", UILayerButtonBase)
-		defer device.DestroyImage(uiButtonBaseImage)
-		defer device.DestroyImageView(uiButtonBaseView)
-		defer device.FreeMemory(uiButtonBaseMem)
+		defer VkDestroyImage(device, uiButtonBaseImage)
+		defer VkDestroyImageView(device, uiButtonBaseView)
+		defer VkFreeMemory(device, uiButtonBaseMem)
 
 		// Create button text layer (renders button labels)
 		uiButtonTextLayer, uiButtonTextImage, uiButtonTextView, uiButtonTextMem := createUILayer("ButtonText", UILayerButtonOver)
-		defer device.DestroyImage(uiButtonTextImage)
-		defer device.DestroyImageView(uiButtonTextView)
-		defer device.FreeMemory(uiButtonTextMem)
+		defer VkDestroyImage(device, uiButtonTextImage)
+		defer VkDestroyImageView(device, uiButtonTextView)
+		defer VkFreeMemory(device, uiButtonTextMem)
 
 		uiTextLayer, uiTextImage, uiTextView, uiTextMem := createUILayer("Text", UILayerText)
-		defer device.DestroyImage(uiTextImage)
-		defer device.DestroyImageView(uiTextView)
-		defer device.FreeMemory(uiTextMem)
+		defer VkDestroyImage(device, uiTextImage)
+		defer VkDestroyImageView(device, uiTextView)
+		defer VkFreeMemory(device, uiTextMem)
 
 		// Create color picker layer (renders color picker UI)
 		colorPickerLayer, colorPickerImage, colorPickerView, colorPickerMem := createUILayer("ColorPicker", UILayerColorPicker)
-		defer device.DestroyImage(colorPickerImage)
-		defer device.DestroyImageView(colorPickerView)
-		defer device.FreeMemory(colorPickerMem)
+		defer VkDestroyImage(device, colorPickerImage)
+		defer VkDestroyImageView(device, colorPickerView)
+		defer VkFreeMemory(device, colorPickerMem)
 
 		world.MakeScreenSpace(uiTextLayer, true)
 		world.MakeScreenSpace(uiButtonBaseLayer, true)
@@ -5787,9 +5914,9 @@ void main() {
 				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+2 {
 					// Lock GPU memory operations to prevent race with upgrade goroutine
 					gpuMemoryMutex.Lock()
-					device.DestroyImageView(trash.ImageView)
-					device.DestroyImage(trash.Image)
-					device.FreeMemory(trash.Memory)
+					VkDestroyImageView(device, trash.ImageView)
+					VkDestroyImage(device, trash.Image)
+					VkFreeMemory(device, trash.Memory)
 					gpuMemoryMutex.Unlock()
 					fmt.Printf("[GARBAGE] Collected resources from death frame %d (current: %d, in-flight: %d)\n", trash.DeathFrame, frameCounter, len(inFlightFences))
 				} else {
@@ -5832,7 +5959,7 @@ void main() {
 					// CRITICAL: device.WaitIdle() triggers Windows TDR → DEVICE_LOST
 					// Instead, wait for just the frames that might be using this descriptor
 					fmt.Printf("[UPGRADE] Frame %d: Waiting for in-flight frames before descriptor update\n", upgrade.FrameIndex)
-					device.WaitForFences(inFlightFences, true, ^uint64(0))
+					VkWaitForFences(device, inFlightFences, true, ^uint64(0))
 					fmt.Printf("[UPGRADE] Frame %d: In-flight frames complete, safe to update descriptor\n", upgrade.FrameIndex)
 
 					// 4. Update descriptor set
@@ -5845,7 +5972,7 @@ void main() {
 					binding := textureIndex / 16384
 					arrayElement := textureIndex % 16384
 
-					device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 						{
 							DstSet:          globalBindlessDescriptorSet,
 							DstBinding:      binding,
@@ -5909,9 +6036,9 @@ void main() {
 			// Animate layer2 in a circle
 
 			// Wait for previous frame
-			//device.WaitForFences([]vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(1000))
+			//VkWaitForFences(device, []vk.Fence{inFlightFences[imageIndexLast]}, true, ^uint64(1000))
 
-			device.WaitForFences([]vk.Fence{inFlightFences[currentFrame]}, false, ^uint64(0))
+			VkWaitForFences(device, []vk.Fence{inFlightFences[currentFrame]}, false, ^uint64(0))
 
 			// Acquire next image
 			imageIndex, err := device.AcquireNextImageKHR(swapchain, ^uint64(0), imageAvailableSems[currentFrame], vk.Fence{})
@@ -5919,7 +6046,7 @@ void main() {
 				panic(fmt.Sprintf("Acquire failed: %v", err))
 			}
 
-			device.ResetFences([]vk.Fence{inFlightFences[imageIndex]})
+			VkResetFences(device, []vk.Fence{inFlightFences[imageIndex]})
 
 			// Get sorted layers
 			sortedLayers := world.QueryRenderablesSorted()
@@ -6064,7 +6191,7 @@ void main() {
 				)
 
 				// Update brushDescriptorSet to point to paintCanvasSource at start of replay
-				device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+				VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 					{
 						DstSet:          brushDescriptorSet,
 						DstBinding:      0,
@@ -6502,7 +6629,7 @@ void main() {
 								paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
 
 								// Update descriptor
-								device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+								VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 									{
 										DstSet:          brushDescriptorSet,
 										DstBinding:      0,
@@ -6605,7 +6732,7 @@ void main() {
 							paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
 
 							// Update descriptor set for next stroke
-							device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+							VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 								{
 									DstSet:          brushDescriptorSet,
 									DstBinding:      0,
@@ -6835,7 +6962,7 @@ void main() {
 					// Update the bindless descriptor set
 					binding := layer2Texture.TextureIndex / texturesPerBinding
 					arrayElement := layer2Texture.TextureIndex % texturesPerBinding
-					device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 						{
 							DstSet:          globalBindlessDescriptorSet,
 							DstBinding:      binding,
@@ -7205,7 +7332,7 @@ void main() {
 					paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
 
 					// Update descriptor set to bind the new source canvas
-					device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+					VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 						{
 							DstSet:          brushDescriptorSet,
 							DstBinding:      0,
@@ -7354,7 +7481,7 @@ void main() {
 							// Update the bindless descriptor set
 							binding := layer2Texture.TextureIndex / texturesPerBinding
 							arrayElement := layer2Texture.TextureIndex % texturesPerBinding
-							device.UpdateDescriptorSets([]vk.WriteDescriptorSet{
+							VkUpdateDescriptorSets(device, []vk.WriteDescriptorSet{
 								{
 									DstSet:          globalBindlessDescriptorSet,
 									DstBinding:      binding,
