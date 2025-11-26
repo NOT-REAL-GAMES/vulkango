@@ -4877,7 +4877,9 @@ void main() {
 			)
 
 			// Generate mipmaps if reaching 2048
-			if nextSize == 2048 {
+			// TESTING: Disable mipmaps to see if they're causing DEVICE_LOST
+			const DISABLE_MIPMAPS_FOR_TESTING = true
+			if nextSize == 2048 && !DISABLE_MIPMAPS_FOR_TESTING {
 				// Transition to TRANSFER_SRC for mipmap generation
 				cmd.PipelineBarrier(
 					vk.PIPELINE_STAGE_TRANSFER_BIT,
