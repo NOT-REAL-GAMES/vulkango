@@ -3874,18 +3874,32 @@ void main() {
 		//world.AddTransform(frameCounterText, textTransform)
 
 		// === Helper Functions for Mipmap Generation ===
+
+		// WINDOWS TDR FIX: Minimum mip size before stopping generation
+		// Generating all the way to 1×1 (12 levels) triggers Windows TDR → DEVICE_LOST
+		// Stopping at 64×64 (7 levels) is plenty for quality and avoids the crash
+		//
+		// MIGRATION PATH TO OPTION 2 (if needed):
+		// If even 7 levels causes issues, implement batched submission:
+		// - Generate 4 mip levels at a time
+		// - Submit command buffer with fence
+		// - Wait for fence, then next batch
+		// This splits GPU work to prevent TDR timeout
+		const MIN_MIP_SIZE = 64 // Stop at 64×64 instead of 1×1
+
 		// Calculate number of mip levels for a texture (will be used for upgradeToFullResolution)
 		calculateMipLevels := func(width, height uint32) uint32 {
-			levels := uint32(1)
-			for width > 1 || height > 1 {
-				levels++
-				if width > 1 {
-					width /= 2
-				}
-				if height > 1 {
-					height /= 2
-				}
+			maxDimension := width
+			if height > maxDimension {
+				maxDimension = height
 			}
+
+			levels := uint32(1)
+			for maxDimension > MIN_MIP_SIZE {
+				maxDimension /= 2
+				levels++
+			}
+
 			return levels
 		}
 		_ = calculateMipLevels // Will be used in upgradeToFullResolution
@@ -4877,9 +4891,8 @@ void main() {
 			)
 
 			// Generate mipmaps if reaching 2048
-			// TESTING: Disable mipmaps to see if they're causing DEVICE_LOST
-			const DISABLE_MIPMAPS_FOR_TESTING = true
-			if nextSize == 2048 && !DISABLE_MIPMAPS_FOR_TESTING {
+			// Now limited to 7 levels (2048→64) to avoid Windows TDR
+			if nextSize == 2048 {
 				// Transition to TRANSFER_SRC for mipmap generation
 				cmd.PipelineBarrier(
 					vk.PIPELINE_STAGE_TRANSFER_BIT,
@@ -5015,7 +5028,7 @@ void main() {
 					}},
 				)
 
-				fmt.Printf("[MIPMAPS] Frame %d: Generated %d mip levels\n", frameNum, mipLevels)
+				fmt.Printf("[MIPMAPS] Frame %d: Generated %d mip levels (2048→64, Windows TDR-safe)\n", frameNum, mipLevels)
 			} else {
 				// Just transition to SHADER_READ_ONLY
 				cmd.PipelineBarrier(
