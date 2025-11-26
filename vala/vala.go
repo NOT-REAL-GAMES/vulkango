@@ -936,7 +936,7 @@ func CreateImageLayer(
 
 	// Submit and wait
 	err = queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{uploadCmd}}}, vk.Fence{})
-	if err != nil{
+	if err != nil {
 		VkDestroyImage(device, textureImage)
 		VkFreeMemory(device, textureMemory)
 		return 0, fmt.Errorf("failed to submit command buffer: %v", err)

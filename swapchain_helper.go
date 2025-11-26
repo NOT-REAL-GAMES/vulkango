@@ -87,13 +87,17 @@ func ChooseSwapExtent(capabilities SurfaceCapabilitiesKHR, windowWidth, windowHe
 }
 
 func ChooseImageCount(capabilities SurfaceCapabilitiesKHR) uint32 {
-	// Request one more than minimum for better performance
-	imageCount := capabilities.MinImageCount + 1
+	// WINDOWS TDR FIX: Request MORE swapchain images for breathing room
+	// More images = less contention = less chance of TDR triggering DEVICE_LOST
+	imageCount := capabilities.MinImageCount + 3 // Was +1, now +3
 
 	// Don't exceed maximum (0 means no limit)
 	if capabilities.MaxImageCount > 0 && imageCount > capabilities.MaxImageCount {
 		imageCount = capabilities.MaxImageCount
 	}
+
+	fmt.Printf("[SWAPCHAIN] Requesting %d images (min=%d, max=%d)\n",
+		imageCount, capabilities.MinImageCount, capabilities.MaxImageCount)
 
 	return imageCount
 }
