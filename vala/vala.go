@@ -4741,14 +4741,17 @@ void main() {
 			// Windows drivers reject concurrent memory allocation/deallocation
 			gpuMemoryMutex.Lock()
 
-			// Create new larger texture
-			newImage, newMemory, err := device.CreateImageWithMemory(
+			// Create new larger texture WITH MIP LEVELS
+			// CRITICAL: Must use CreateImageWithMemoryAndMips to allocate space for all mip levels!
+			// Using CreateImageWithMemory (1 mip) then trying to blit to other mips = DEVICE_LOST
+			newImage, newMemory, err := device.CreateImageWithMemoryAndMips(
 				nextSize, nextSize,
 				vk.FORMAT_R8G8B8A8_UNORM,
 				vk.IMAGE_TILING_OPTIMAL,
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
 				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 				physicalDevice,
+				mipLevels, // Actually allocate the mip levels!
 			)
 			if err != nil {
 				gpuMemoryMutex.Unlock()
@@ -5187,40 +5190,33 @@ void main() {
 						},
 					}},
 				)
-			}
+				// End and submit for non-mipmap path
+				cmd.End()
 
-			cmd.End()
+				fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
+				if err != nil {
+					fmt.Printf("[UPGRADE] Frame %d: Failed to create fence: %v\n", frameNum, err)
+					VkDestroyImageView(device, newView)
+					VkDestroyImage(device, newImage)
+					VkFreeMemory(device, newMemory)
+					return
+				}
 
-			// Create fence for this upgrade operation
-			fence, err := VkCreateFence(device, &vk.FenceCreateInfo{})
-			if err != nil {
-				fmt.Printf("[UPGRADE] Frame %d: Failed to create fence: %v\n", frameNum, err)
-				VkDestroyImageView(device, newView)
-				VkDestroyImage(device, newImage)
-				VkFreeMemory(device, newMemory)
-				return
-			}
-
-			// Submit and wait for THIS upgrade only
-			// CRITICAL: Serialize queue submissions to prevent DEVICE_LOST on Windows
-			// Lock -> Submit -> Unlock -> WaitForFences (allows main thread to keep rendering)
-			err = queue.Submit([]vk.SubmitInfo{
-				{CommandBuffers: []vk.CommandBuffer{cmd}},
-			}, fence)
-			if err != nil {
-				fmt.Printf("[UPGRADE] Frame %d: Queue submit failed: %v\n", frameNum, err)
+				err = queue.Submit([]vk.SubmitInfo{
+					{CommandBuffers: []vk.CommandBuffer{cmd}},
+				}, fence)
+				if err != nil {
+					fmt.Printf("[UPGRADE] Frame %d: Queue submit failed: %v\n", frameNum, err)
+					VkDestroyFence(device, fence)
+					VkDestroyImageView(device, newView)
+					VkDestroyImage(device, newImage)
+					VkFreeMemory(device, newMemory)
+					return
+				}
+				VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
 				VkDestroyFence(device, fence)
-				VkDestroyImageView(device, newView)
-				VkDestroyImage(device, newImage)
-				VkFreeMemory(device, newMemory)
-				return
 			}
-			VkWaitForFences(device, []vk.Fence{fence}, true, ^uint64(0))
 
-			// Clean up fence (don't free command buffers - let pool manage them)
-			VkDestroyFence(device, fence)
-
-			// Verify frame still exists
 			frameTexturesMutex.RLock()
 			stillExists := frameTextures[frameNum] != nil
 			frameTexturesMutex.RUnlock()
