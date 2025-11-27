@@ -4783,61 +4783,10 @@ void main() {
 					}},
 				)
 
-				// End this command buffer and submit (blit is done)
-				cmd.End()
-				blitFence, err := device.CreateFence(&vk.FenceCreateInfo{})
-				if err != nil {
-					fmt.Printf("[UPGRADE] Frame %d: Failed to create blit fence: %v\n", frameNum, err)
-					device.DestroyImageView(newView)
-					device.DestroyImage(newImage)
-					device.FreeMemory(newMemory)
-					return
-				}
-				err = queue.Submit([]vk.SubmitInfo{
-					{CommandBuffers: []vk.CommandBuffer{cmd}},
-				}, blitFence)
-				if err != nil {
-					fmt.Printf("[UPGRADE] Frame %d: Blit submit failed: %v\n", frameNum, err)
-					device.DestroyFence(blitFence)
-					device.DestroyImageView(newView)
-					device.DestroyImage(newImage)
-					device.FreeMemory(newMemory)
-					return
-				}
-				device.WaitForFences([]vk.Fence{blitFence}, true, ^uint64(0))
-				device.DestroyFence(blitFence)
-
-				// BATCHED MIPMAP GENERATION: 2 mips at a time
-				const MIPS_PER_BATCH = 2
-				fmt.Printf("[MIPMAPS] Frame %d: Starting batched generation (%d mips, %d per batch)\n",
-					frameNum, mipLevels-1, MIPS_PER_BATCH)
-
-				for batchStart := uint32(1); batchStart < mipLevels; batchStart += MIPS_PER_BATCH {
-					batchEnd := batchStart + MIPS_PER_BATCH
-					if batchEnd > mipLevels {
-						batchEnd = mipLevels
-					}
-
-					// Allocate command buffer for this batch
-					cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-						CommandPool:        transferCommandPool,
-						Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-						CommandBufferCount: 1,
-					})
-					if err != nil {
-						fmt.Printf("[UPGRADE] Frame %d: Failed to allocate mip cmd buffer: %v\n", frameNum, err)
-						device.DestroyImageView(newView)
-						device.DestroyImage(newImage)
-						device.FreeMemory(newMemory)
-						return
-					}
-					mipCmd := cmdBufs[0]
-					mipCmd.Begin(&vk.CommandBufferBeginInfo{
-						Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-					})
-
-					// Generate mips for this batch
-					for i := batchStart; i < batchEnd; i++ {
+				// SINGLE-SUBMISSION MIPMAP GENERATION
+				// Generate all mips in one command buffer, submit once
+				// (Batching was only needed when we thought TDR was the issue)
+				for i := uint32(1); i < mipLevels; i++ {
 					prevWidth := nextSize >> (i - 1)
 					prevHeight := nextSize >> (i - 1)
 					currWidth := nextSize >> i
@@ -4850,7 +4799,7 @@ void main() {
 					}
 
 					// Transition current mip to DST
-					mipCmd.PipelineBarrier(
+					cmd.PipelineBarrier(
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
 						0,
@@ -4873,7 +4822,7 @@ void main() {
 					)
 
 					// Blit previous mip → current mip
-					mipCmd.CmdBlitImage(
+					cmd.CmdBlitImage(
 						newImage, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 						newImage, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 						[]vk.ImageBlit{{
@@ -4902,7 +4851,7 @@ void main() {
 					)
 
 					// Transition current mip to SRC for next iteration
-					mipCmd.PipelineBarrier(
+					cmd.PipelineBarrier(
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
 						0,
@@ -4923,61 +4872,10 @@ void main() {
 							},
 						}},
 					)
-				} // End inner mip generation loop
-
-					// End batch command buffer
-					mipCmd.End()
-
-					// Submit this batch
-					batchFence, err := device.CreateFence(&vk.FenceCreateInfo{})
-					if err != nil {
-						fmt.Printf("[UPGRADE] Frame %d: Failed to create batch fence: %v\n", frameNum, err)
-						device.FreeCommandBuffers(transferCommandPool, cmdBufs)
-						device.DestroyImageView(newView)
-						device.DestroyImage(newImage)
-						device.FreeMemory(newMemory)
-						return
-					}
-
-					err = queue.Submit([]vk.SubmitInfo{
-						{CommandBuffers: []vk.CommandBuffer{mipCmd}},
-					}, batchFence)
-					if err != nil {
-						fmt.Printf("[UPGRADE] Frame %d: Batch submit failed: %v\n", frameNum, err)
-						device.DestroyFence(batchFence)
-						device.FreeCommandBuffers(transferCommandPool, cmdBufs)
-						device.DestroyImageView(newView)
-						device.DestroyImage(newImage)
-						device.FreeMemory(newMemory)
-						return
-					}
-
-					device.WaitForFences([]vk.Fence{batchFence}, true, ^uint64(0))
-					device.DestroyFence(batchFence)
-					device.FreeCommandBuffers(transferCommandPool, cmdBufs)
-
-					fmt.Printf("[MIPMAPS] Frame %d: Batch %d-%d complete\n", frameNum, batchStart, batchEnd-1)
-				} // End batch loop
-
-				// Final transition: All mips to SHADER_READ_ONLY
-				finalCmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
-					CommandPool:        transferCommandPool,
-					Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
-					CommandBufferCount: 1,
-				})
-				if err != nil {
-					fmt.Printf("[UPGRADE] Frame %d: Failed to allocate final cmd buffer: %v\n", frameNum, err)
-					device.DestroyImageView(newView)
-					device.DestroyImage(newImage)
-					device.FreeMemory(newMemory)
-					return
 				}
-				finalCmd := finalCmdBufs[0]
-				finalCmd.Begin(&vk.CommandBufferBeginInfo{
-					Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-				})
 
-				finalCmd.PipelineBarrier(
+				// Transition all mips to SHADER_READ_ONLY
+				cmd.PipelineBarrier(
 					vk.PIPELINE_STAGE_TRANSFER_BIT,
 					vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					0,
@@ -4999,37 +4897,7 @@ void main() {
 					}},
 				)
 
-				finalCmd.End()
-
-				finalFence, err := device.CreateFence(&vk.FenceCreateInfo{})
-				if err != nil {
-					fmt.Printf("[UPGRADE] Frame %d: Failed to create final fence: %v\n", frameNum, err)
-					device.FreeCommandBuffers(transferCommandPool, finalCmdBufs)
-					device.DestroyImageView(newView)
-					device.DestroyImage(newImage)
-					device.FreeMemory(newMemory)
-					return
-				}
-
-				err = queue.Submit([]vk.SubmitInfo{
-					{CommandBuffers: []vk.CommandBuffer{finalCmd}},
-				}, finalFence)
-				if err != nil {
-					fmt.Printf("[UPGRADE] Frame %d: Final submit failed: %v\n", frameNum, err)
-					device.DestroyFence(finalFence)
-					device.FreeCommandBuffers(transferCommandPool, finalCmdBufs)
-					device.DestroyImageView(newView)
-					device.DestroyImage(newImage)
-					device.FreeMemory(newMemory)
-					return
-				}
-
-				device.WaitForFences([]vk.Fence{finalFence}, true, ^uint64(0))
-				device.DestroyFence(finalFence)
-				device.FreeCommandBuffers(transferCommandPool, finalCmdBufs)
-
-				fmt.Printf("[MIPMAPS] Frame %d: Generated %d mip levels in %d batches (Windows TDR-safe)\n",
-					frameNum, mipLevels, (mipLevels-1+MIPS_PER_BATCH-1)/MIPS_PER_BATCH)
+				fmt.Printf("[MIPMAPS] Frame %d: Generated %d mip levels (single submission)\n", frameNum, mipLevels)
 			} else {
 				// Just transition to SHADER_READ_ONLY
 				cmd.PipelineBarrier(
