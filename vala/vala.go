@@ -2252,7 +2252,7 @@ func main() {
 				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT | // Add TRANSFER_SRC for Download
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
-			UseSparseBinding: true, // SPARSE BINDING ENABLED! RTX 2000+ only
+			UseSparseBinding: false, // DISABLED FOR WINDOWS TESTING (was true)
 		}, commandPool, queue.Handle, &queue.Mutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas A: %v", err))
@@ -2271,7 +2271,7 @@ func main() {
 				vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 				vk.IMAGE_USAGE_TRANSFER_SRC_BIT |
 				vk.IMAGE_USAGE_STORAGE_BIT, // For compute shader access
-			UseSparseBinding: true,
+			UseSparseBinding: false, // DISABLED FOR WINDOWS TESTING (was true)
 		}, commandPool, queue.Handle, &queue.Mutex)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to create paint canvas B: %v", err))
