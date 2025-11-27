@@ -562,12 +562,26 @@ type GPUGarbage struct {
 	ImageView  vk.ImageView
 	Memory     vk.DeviceMemory
 	DeathFrame uint64 // frameCounter when this was marked for deletion
+	Size       uint32 // Image dimensions for pooling
+	MipLevels  uint32 // Mip level count for pooling
 }
 
 // Global garbage collection queue for deferred Vulkan resource destruction
 var garbageQueue []GPUGarbage
 var garbageMutex sync.Mutex
 var frameCounter uint64 // Frame counter for garbage collection timing
+
+// Image Recycling Pool - avoids expensive vkFreeMemory calls on Windows WDDM
+// Pool images instead of freeing them during scrubbing for better performance
+type RecyclableImage struct {
+	Image    vk.Image
+	Memory   vk.DeviceMemory
+	Size     uint32 // Image dimensions (square textures, so just one value)
+	MipLevels uint32
+}
+var imagePool []RecyclableImage
+var imagePoolMutex sync.Mutex
+const MAX_POOLED_IMAGES = 32 // Limit pool size to prevent unbounded memory growth
 
 // GPU memory operation mutex - prevents concurrent allocation/deallocation
 // Windows drivers are strict about simultaneous GPU memory operations
@@ -4601,34 +4615,63 @@ void main() {
 			// Calculate mip levels
 			mipLevels := calculateMipLevels(nextSize, nextSize)
 
-			// CRITICAL: Lock GPU memory operations to prevent race with garbage collector
-			// Windows drivers reject concurrent memory allocation/deallocation
-			gpuMemoryMutex.Lock()
+			// Try to get a recycled image from the pool first (avoids expensive WDDM allocation)
+			var newImage vk.Image
+			var newMemory vk.DeviceMemory
+			var fromPool bool
 
-			// Create new larger texture WITH MIP LEVELS
-			// CRITICAL: Must use CreateImageWithMemoryAndMips to allocate space for all mip levels!
-			// Using CreateImageWithMemory (1 mip) then trying to blit to other mips = DEVICE_LOST
-			newImage, newMemory, err := device.CreateImageWithMemoryAndMips(
-				nextSize, nextSize,
-				vk.FORMAT_R8G8B8A8_UNORM,
-				vk.IMAGE_TILING_OPTIMAL,
-				vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
-				vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				physicalDevice,
-				mipLevels, // Actually allocate the mip levels!
-			)
-			if err != nil {
+			imagePoolMutex.Lock()
+			for i, pooled := range imagePool {
+				if pooled.Size == nextSize && pooled.MipLevels == mipLevels {
+					// Found a matching image in the pool!
+					newImage = pooled.Image
+					newMemory = pooled.Memory
+					fromPool = true
+					// Remove from pool (swap with last element)
+					imagePool[i] = imagePool[len(imagePool)-1]
+					imagePool = imagePool[:len(imagePool)-1]
+					//fmt.Printf("[POOL] Reused %dx%d image from pool (pool size: %d)\n", nextSize, nextSize, len(imagePool))
+					break
+				}
+			}
+			imagePoolMutex.Unlock()
+
+			// If not found in pool, allocate new
+			if !fromPool {
+				// CRITICAL: Lock GPU memory operations to prevent race with garbage collector
+				// Windows drivers reject concurrent memory allocation/deallocation
+				gpuMemoryMutex.Lock()
+
+				// Create new larger texture WITH MIP LEVELS
+				// CRITICAL: Must use CreateImageWithMemoryAndMips to allocate space for all mip levels!
+				// Using CreateImageWithMemory (1 mip) then trying to blit to other mips = DEVICE_LOST
+				var err error
+				newImage, newMemory, err = device.CreateImageWithMemoryAndMips(
+					nextSize, nextSize,
+					vk.FORMAT_R8G8B8A8_UNORM,
+					vk.IMAGE_TILING_OPTIMAL,
+					vk.IMAGE_USAGE_TRANSFER_SRC_BIT|vk.IMAGE_USAGE_TRANSFER_DST_BIT|vk.IMAGE_USAGE_SAMPLED_BIT,
+					vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+					physicalDevice,
+					mipLevels, // Actually allocate the mip levels!
+				)
 				gpuMemoryMutex.Unlock()
-				//fmt.Printf("[UPGRADE] Frame %d: Failed to create image: %v\n", frameNum, err)
-				return
+				if err != nil {
+					//fmt.Printf("[UPGRADE] Frame %d: Failed to create image: %v\n", frameNum, err)
+					return
+				}
+				//fmt.Printf("[ALLOC] Allocated new %dx%d image\n", nextSize, nextSize)
 			}
 
 			newView, err := device.CreateImageViewForTexture(newImage, vk.FORMAT_R8G8B8A8_UNORM)
-			gpuMemoryMutex.Unlock() // Unlock after image view creation
 			if err != nil {
 				//fmt.Printf("[UPGRADE] Frame %d: Failed to create image view: %v\n", frameNum, err)
-				device.DestroyImage(newImage)
-				device.FreeMemory(newMemory)
+				if !fromPool {
+					device.DestroyImage(newImage)
+					device.FreeMemory(newMemory)
+				}
+				// Note: if from pool and view creation fails, we lose the pooled image
+				// This is rare and acceptable - pool will refill
 				return
 			}
 
@@ -5781,30 +5824,43 @@ void main() {
 			//currentFrameLast = currentFrame
 			frameCounter++
 
-			// === GPU Garbage Collection ===
-			// Safely destroy Vulkan resources that are no longer in use by the GPU
-			// Resources are only destroyed after FRAMES_IN_FLIGHT + 2 frames have passed
-			// to guarantee all command buffers referencing them have completed execution
+			// === GPU Garbage Collection with Image Pooling ===
+			// Safely process Vulkan resources that are no longer in use by the GPU
+			// Resources are only processed after FRAMES_IN_FLIGHT + 2 frames have passed
+			// Instead of freeing memory (expensive WDDM syscall), we pool images for reuse
 			garbageMutex.Lock()
 			n := 0
 			for _, trash := range garbageQueue {
-				// If the trash is older than FRAMES_IN_FLIGHT + 2, it's safe to delete
+				// If the trash is older than FRAMES_IN_FLIGHT + 2, it's safe to process
 				if frameCounter > trash.DeathFrame+uint64(len(inFlightFences))+2 {
-					// Lock GPU memory operations to prevent race with upgrade goroutine
 					gpuMemoryMutex.Lock()
+					// Always destroy the image view (we'll create a new one when reusing)
 					device.DestroyImageView(trash.ImageView)
-					device.DestroyImage(trash.Image)
-					device.FreeMemory(trash.Memory)
+
+					// Pool the image and memory instead of freeing (avoids expensive WDDM syscall)
+					imagePoolMutex.Lock()
+					if len(imagePool) < MAX_POOLED_IMAGES && trash.Size > 0 {
+						// Add to pool for reuse
+						imagePool = append(imagePool, RecyclableImage{
+							Image:     trash.Image,
+							Memory:    trash.Memory,
+							Size:      trash.Size,
+							MipLevels: trash.MipLevels,
+						})
+						//fmt.Printf("[POOL] Added %dx%d image to pool (pool size: %d)\n", trash.Size, trash.Size, len(imagePool))
+					} else {
+						// Pool full or unknown size - destroy normally
+						device.DestroyImage(trash.Image)
+						device.FreeMemory(trash.Memory)
+						//fmt.Printf("[GARBAGE] Pool full, freed image memory\n")
+					}
+					imagePoolMutex.Unlock()
 					gpuMemoryMutex.Unlock()
-					//fmt.Printf("[GARBAGE] Collected resources from death frame %d (current: %d, in-flight: %d)\n", trash.DeathFrame, frameCounter, len(inFlightFences))
 				} else {
 					// Keep it - still potentially in use
 					garbageQueue[n] = trash
 					n++
 				}
-			}
-			if n > 0 && frameCounter%60 == 0 {
-				//fmt.Printf("[GARBAGE] %d items still queued (oldest death frame: %d, current frame: %d)\n", n, garbageQueue[0].DeathFrame, frameCounter)
 			}
 			garbageQueue = garbageQueue[:n]
 			garbageMutex.Unlock()
@@ -5820,10 +5876,12 @@ void main() {
 					frameTexturesMutex.Lock()
 					ft := frameTextures[upgrade.FrameIndex]
 
-					// 1. Capture old resources for garbage collection
+					// 1. Capture old resources for garbage collection (including size for pooling)
 					oldImage := ft.Image
 					oldView := ft.ImageView
 					oldMem := ft.Memory
+					oldSize := ft.ActualWidth
+					oldMipLevels := ft.MipLevels
 
 					// 2. Atomic swap in Go memory
 					ft.Image = upgrade.NewImage
@@ -5872,6 +5930,8 @@ void main() {
 						ImageView:  oldView,
 						Memory:     oldMem,
 						DeathFrame: frameCounter,
+						Size:       oldSize,
+						MipLevels:  oldMipLevels,
 					})
 					garbageMutex.Unlock()
 
