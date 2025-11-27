@@ -354,7 +354,7 @@ if err != nil {
     // Handle error - err will be a vk.Result type
     log.Fatal(err)
 }
-fmt.Printf("Vulkan version: %d\n", version)
+//fmt.Printf("Vulkan version: %d\n", version)
 ```
 
 ## Notes for AI Assistants

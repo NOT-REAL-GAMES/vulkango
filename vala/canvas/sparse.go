@@ -3,7 +3,6 @@ package canvas
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 )
@@ -104,8 +103,8 @@ func NewSparseCanvas(cfg Config, commandPool vk.CommandPool, queue vk.Queue, que
 	bytesPerPixel := getBytesPerPixel(cfg.Format)
 	canvas.sparsePageSize = uint64(granularity.Width) * uint64(granularity.Height) * uint64(bytesPerPixel)
 
-	fmt.Printf("Sparse canvas created: %dx%d, page size: %dx%d (%d bytes)\n",
-		cfg.Width, cfg.Height, canvas.pageWidth, canvas.pageHeight, canvas.sparsePageSize)
+	//fmt.Printf("Sparse canvas created: %dx%d, page size: %dx%d (%d bytes)\n",
+	//	cfg.Width, cfg.Height, canvas.pageWidth, canvas.pageHeight, canvas.sparsePageSize)
 
 	// Create image view
 	imageView, err := cfg.Device.CreateImageView(&vk.ImageViewCreateInfo{
@@ -277,9 +276,9 @@ func (c *SparseCanvas) AllocateAll() error {
 	// Calculate number of pages
 	pagesX := int((c.width + c.pageWidth - 1) / c.pageWidth)
 	pagesY := int((c.height + c.pageHeight - 1) / c.pageHeight)
-	totalPages := pagesX * pagesY
+	//totalPages := pagesX * pagesY
 
-	fmt.Printf("%d: Allocating all sparse pages: %dx%d = %d pages (BATCHED)\n", time.Now().UnixMilli(), pagesX, pagesY, totalPages)
+	//fmt.Printf("%d: Allocating all sparse pages: %dx%d = %d pages (BATCHED)\n", time.Now().UnixMilli(), pagesX, pagesY, totalPages)
 
 	// Count pages that need allocation
 	neededPages := 0
@@ -293,14 +292,14 @@ func (c *SparseCanvas) AllocateAll() error {
 	}
 
 	if neededPages == 0 {
-		fmt.Printf("All pages already allocated\n")
+		//fmt.Printf("All pages already allocated\n")
 		return nil
 	}
 
 	// Allocate ONE large memory block for all pages (MUCH faster!)
 	memReqs := c.device.GetImageMemoryRequirements(c.image)
 	totalSize := uint64(neededPages) * c.sparsePageSize
-	fmt.Printf("%d: Allocating single memory block: %d bytes for %d pages\n", time.Now().UnixMilli(), totalSize, neededPages)
+	//fmt.Printf("%d: Allocating single memory block: %d bytes for %d pages\n", time.Now().UnixMilli(), totalSize, neededPages)
 
 	bigMemory, err := c.device.AllocateMemory(&vk.MemoryAllocateInfo{
 		AllocationSize:  totalSize,
@@ -310,7 +309,7 @@ func (c *SparseCanvas) AllocateAll() error {
 		return fmt.Errorf("failed to allocate big memory block: %w", err)
 	}
 
-	fmt.Printf("%d: Memory allocated, now binding pages\n", time.Now().UnixMilli())
+	//fmt.Printf("%d: Memory allocated, now binding pages\n", time.Now().UnixMilli())
 
 	// Collect all binds using offsets into the big memory block
 	var binds []vk.SparseImageMemoryBind
@@ -369,7 +368,7 @@ func (c *SparseCanvas) AllocateAll() error {
 		return fmt.Errorf("failed to bind sparse memory: %w", err)
 	}
 
-	fmt.Printf("%d: All %d sparse pages allocated successfully (BATCHED)\n", time.Now().UnixMilli(), len(binds))
+	//fmt.Printf("%d: All %d sparse pages allocated successfully (BATCHED)\n", time.Now().UnixMilli(), len(binds))
 	return nil
 }
 

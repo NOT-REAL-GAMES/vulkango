@@ -1,7 +1,6 @@
 package systems
 
 import (
-	"fmt"
 	"unsafe"
 
 	vk "github.com/NOT-REAL-GAMES/vulkango"
@@ -95,7 +94,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 			vertices, indices := GenerateTextQuads(text, renderer.Atlas)
 
 			// Debug: Print what we're rendering (only first time to avoid spam)
-			//fmt.Printf("[TEXT] Entity %d: '%s' -> %d vertices, %d indices\n", entity, text.Content, len(vertices), len(indices))
+			////fmt.Printf("[TEXT] Entity %d: '%s' -> %d vertices, %d indices\n", entity, text.Content, len(vertices), len(indices))
 
 			// Offset indices for concatenation
 			for _, idx := range indices {
@@ -143,7 +142,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 
 			vertices, indices := GenerateTextQuads(textComponent, renderer.Atlas)
 
-			//fmt.Printf("[TEXT] Button %d label: '%s' -> %d vertices, %d indices\n", entity, button.Label, len(vertices), len(indices))
+			////fmt.Printf("[TEXT] Button %d label: '%s' -> %d vertices, %d indices\n", entity, button.Label, len(vertices), len(indices))
 
 			// Offset indices for concatenation
 			for _, idx := range indices {
@@ -160,14 +159,14 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 	}
 
 	// Debug: Show total
-	//fmt.Printf("[TEXT] Total: %d text entities, %d button labels, %d vertices, %d indices\n", textEntityCount, buttonLabelCount, len(allVertices), len(allIndices))
+	////fmt.Printf("[TEXT] Total: %d text entities, %d button labels, %d vertices, %d indices\n", textEntityCount, buttonLabelCount, len(allVertices), len(allIndices))
 
 	// Debug: Print first few vertices to check coordinates
 	if len(allVertices) > 0 {
-		//fmt.Printf("[TEXT] First vertex: Pos=(%.1f, %.1f), UV=(%.3f, %.3f)\n",
+		////fmt.Printf("[TEXT] First vertex: Pos=(%.1f, %.1f), UV=(%.3f, %.3f)\n",
 		//	allVertices[0].PosX, allVertices[0].PosY, allVertices[0].U, allVertices[0].V)
 		if len(allVertices) > 16 {
-			//	fmt.Printf("[TEXT] Vertex 16 (char 5): Pos=(%.1f, %.1f)\n",
+			//	//fmt.Printf("[TEXT] Vertex 16 (char 5): Pos=(%.1f, %.1f)\n",
 			//		allVertices[16].PosX, allVertices[16].PosY)
 		}
 	}
@@ -179,7 +178,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 	// Update staging vertex buffer (HOST_VISIBLE, render directly from it)
 	vertexData, err := device.MapMemory(stagingVertexMemory, 0, uint64(len(allVertices)*16))
 	if err != nil {
-		//fmt.Printf("[TEXT] ERROR: Failed to map vertex memory: %v\n", err)
+		////fmt.Printf("[TEXT] ERROR: Failed to map vertex memory: %v\n", err)
 		return // Failed to map memory
 	}
 	// Copy vertex data as bytes
@@ -188,7 +187,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 
 	// Debug: Verify the copy worked
 	if len(vertexSlice) > 16 {
-		//fmt.Printf("[TEXT] Frame %d - After copy - Vertex 0: Pos=(%.1f, %.1f), Vertex 16: Pos=(%.1f, %.1f)\n",
+		////fmt.Printf("[TEXT] Frame %d - After copy - Vertex 0: Pos=(%.1f, %.1f), Vertex 16: Pos=(%.1f, %.1f)\n",
 		//	frameIndex, vertexSlice[0].PosX, vertexSlice[0].PosY,
 		//	vertexSlice[16].PosX, vertexSlice[16].PosY)
 	}
@@ -202,14 +201,14 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 	// Update staging index buffer
 	indexData, err := device.MapMemory(stagingIndexMemory, 0, uint64(len(allIndices)*2))
 	if err != nil {
-		fmt.Printf("[TEXT] ERROR: Failed to map index memory: %v\n", err)
+		//fmt.Printf("[TEXT] ERROR: Failed to map index memory: %v\n", err)
 		return // Failed to map memory
 	}
 	indexSlice := (*[1 << 30]uint16)(indexData)[:len(allIndices)]
 	copy(indexSlice, allIndices)
 
 	// Debug: Check indices
-	//fmt.Printf("[TEXT] Frame %d - First 10 indices: %v\n", frameIndex, indexSlice[:10])
+	////fmt.Printf("[TEXT] Frame %d - First 10 indices: %v\n", frameIndex, indexSlice[:10])
 
 	device.UnmapMemory(stagingIndexMemory)
 
@@ -218,7 +217,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 	cmd.BindVertexBuffers(0, []vk.Buffer{stagingVertexBuffer}, []uint64{0})
 	cmd.BindIndexBuffer(stagingIndexBuffer, 0, vk.INDEX_TYPE_UINT16)
 
-	//fmt.Printf("[TEXT] BufferSet %d, Frame %d - Using separate staging buffers\n", bufferSetIndex, frameIndex)
+	////fmt.Printf("[TEXT] BufferSet %d, Frame %d - Using separate staging buffers\n", bufferSetIndex, frameIndex)
 
 	// Push constants: screen size + padding + color (std140 alignment)
 	// Format: [screenWidth, screenHeight, padding, padding, colorR, colorG, colorB, colorA]
@@ -233,7 +232,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 		1.0, // ColorB
 		1.0, // ColorA
 	}
-	//fmt.Printf("[TEXT] Push constants: screen=(%d, %d), padding, color=(1,1,1,1)\n", screenWidth, screenHeight)
+	////fmt.Printf("[TEXT] Push constants: screen=(%d, %d), padding, color=(1,1,1,1)\n", screenWidth, screenHeight)
 
 	// Convert to bytes
 	pushConstantsBytes := make([]byte, 32) // 8 floats * 4 bytes (with std140 padding)
@@ -249,7 +248,7 @@ func RenderText(world *ecs.World, renderer *TextRenderer, cmd vk.CommandBuffer, 
 
 	// Draw all text
 	indexCount := uint32(len(allIndices))
-	//fmt.Printf("[TEXT] DrawIndexed: indexCount=%d, instanceCount=1\n", indexCount)
+	////fmt.Printf("[TEXT] DrawIndexed: indexCount=%d, instanceCount=1\n", indexCount)
 	cmd.DrawIndexed(indexCount, 1, 0, 0, 0)
 }
 

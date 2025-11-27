@@ -137,7 +137,7 @@ func RenderUIButtonBases(world *ecs.World, ctx *UIRenderContext) {
 
 		// Skip disabled buttons
 		if !button.Enabled {
-			//fmt.Printf("[UI DEBUG] Skipping disabled button: Entity=%d, Label='%s'\n", entity, button.Label)
+			////fmt.Printf("[UI DEBUG] Skipping disabled button: Entity=%d, Label='%s'\n", entity, button.Label)
 			continue
 		}
 
@@ -193,7 +193,7 @@ func RenderUIButtonBases(world *ecs.World, ctx *UIRenderContext) {
 
 	// Debug: Show how many buttons were actually rendered vs queried
 	if renderedCount != len(buttons) {
-		//fmt.Printf("[UI DEBUG] Rendered %d/%d buttons (some were disabled)\n", renderedCount, len(buttons))
+		////fmt.Printf("[UI DEBUG] Rendered %d/%d buttons (some were disabled)\n", renderedCount, len(buttons))
 	}
 }
 
@@ -209,4 +209,3 @@ func RenderUIButtonLabels(world *ecs.World, ctx *UIRenderContext, frameIndex int
 
 // renderButtonLabels is DEPRECATED - removed in favor of RenderText with buffer set index
 // All text rendering now goes through RenderText() to avoid buffer conflicts
-

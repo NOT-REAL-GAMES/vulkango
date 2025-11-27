@@ -47,7 +47,7 @@ func ChooseSurfaceFormat(availableFormats []SurfaceFormatKHR) SurfaceFormatKHR {
 func ChoosePresentMode(availableModes []PresentModeKHR) PresentModeKHR {
 	// Prefer mailbox (triple buffering) for lowest latency without tearing
 	for _, mode := range availableModes {
-		fmt.Printf("%v", mode)
+		//fmt.Printf("%v", mode)
 		if mode == PRESENT_MODE_MAILBOX_KHR {
 			return mode
 		}
@@ -96,8 +96,8 @@ func ChooseImageCount(capabilities SurfaceCapabilitiesKHR) uint32 {
 		imageCount = capabilities.MaxImageCount
 	}
 
-	fmt.Printf("[SWAPCHAIN] Requesting %d images (min=%d, max=%d)\n",
-		imageCount, capabilities.MinImageCount, capabilities.MaxImageCount)
+	//fmt.Printf("[SWAPCHAIN] Requesting %d images (min=%d, max=%d)\n",
+	//	imageCount, capabilities.MinImageCount, capabilities.MaxImageCount)
 
 	return imageCount
 }

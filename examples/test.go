@@ -69,12 +69,12 @@ func LoadImage(path string) (*ImageData, error) {
 	defer file.Close()
 
 	// Decode image (format auto-detected)
-	img, format, err := image.Decode(file)
+	img, _, err := image.Decode(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %v", err)
 	}
 
-	fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
+	//fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
 
 	// Convert to RGBA
 	bounds := img.Bounds()
@@ -112,7 +112,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("Required Vulkan extensions: %v\n", exts)
+	//fmt.Printf("Required Vulkan extensions: %v\n", exts)
 
 	// Create Vulkan instance WITH the required extensions
 	version, _ := vk.EnumerateInstanceVersion()
@@ -137,7 +137,7 @@ func main() {
 	defer instance.Destroy()
 
 	devices, _ := instance.EnumeratePhysicalDevices()
-	fmt.Printf("Found %d physical devices\n", len(devices))
+	//fmt.Printf("Found %d physical devices\n", len(devices))
 
 	// Create the surface
 	surfHandle, err := window.VulkanCreateSurface(instance.Handle())
@@ -145,42 +145,42 @@ func main() {
 		panic(err)
 	}
 	surface := vk.NewSurfaceKHR(surfHandle)
-	fmt.Printf("Created Vulkan surface: %v\n", surface)
+	//fmt.Printf("Created Vulkan surface: %v\n", surface)
 
 	// Test surface queries with first physical device
 	if len(devices) > 0 {
 		device := devices[0]
 
 		// Query surface capabilities
-		caps, err := device.GetSurfaceCapabilitiesKHR(surface)
+		_, err := device.GetSurfaceCapabilitiesKHR(surface)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nSurface Capabilities:\n")
-		fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
-		fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
+		//fmt.Printf("\nSurface Capabilities:\n")
+		//fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
+		//fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
 
 		// Query surface formats
 		formats, err := device.GetSurfaceFormatsKHR(surface)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nAvailable formats: %d\n", len(formats))
-		for i, format := range formats {
+		//fmt.Printf("\nAvailable formats: %d\n", len(formats))
+		for i, _ := range formats {
 			if i < 3 { // Just print first 3
-				fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
+				//fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
 			}
 		}
 
 		// Query present modes
-		modes, err := device.GetSurfacePresentModesKHR(surface)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("\nAvailable present modes: %d\n", len(modes))
-		for _, mode := range modes {
-			fmt.Printf("  Mode: %d\n", mode)
-		}
+		// modes, err := device.GetSurfacePresentModesKHR(surface)
+		// if err != nil {
+		// 	panic(err)
+		// }
+		//fmt.Printf("\nAvailable present modes: %d\n", len(modes))
+		// for _, mode := range modes {
+		// 	//fmt.Printf("  Mode: %d\n", mode)
+		// }
 	}
 
 	if len(devices) > 0 {
@@ -188,11 +188,11 @@ func main() {
 
 		// Find a graphics queue family that supports presentation
 		queueFamilies := physicalDevice.GetQueueFamilyProperties()
-		fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
+		//fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
 
 		graphicsFamily := -1
 		for i, family := range queueFamilies {
-			fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
+			//fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
 
 			// Check if supports graphics
 			if family.QueueFlags&vk.QUEUE_GRAPHICS_BIT != 0 {
@@ -208,7 +208,7 @@ func main() {
 			panic("No suitable queue family found!")
 		}
 
-		fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
+		//fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
 
 		// Create device
 		device, err := physicalDevice.CreateDevice(&vk.DeviceCreateInfo{
@@ -232,7 +232,7 @@ func main() {
 		fmt.Println("Logical device created!")
 
 		queue := device.GetQueue(uint32(graphicsFamily), 0)
-		fmt.Printf("Got queue: %v\n", queue)
+		//fmt.Printf("Got queue: %v\n", queue)
 
 		// Create swapchain
 		swapchain, swapFormat, swapExtent, err := vk.CreateSwapchain(
@@ -247,16 +247,16 @@ func main() {
 		}
 		defer device.DestroySwapchainKHR(swapchain)
 
-		fmt.Printf("\nSwapchain created!\n")
-		fmt.Printf("  Format: %d\n", swapFormat)
-		fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
+		//fmt.Printf("\nSwapchain created!\n")
+		//fmt.Printf("  Format: %d\n", swapFormat)
+		//fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
 
 		// Get swapchain images
 		swapImages, err := device.GetSwapchainImagesKHR(swapchain)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("  Images: %d\n", len(swapImages))
+		//fmt.Printf("  Images: %d\n", len(swapImages))
 
 		swapImageViews, err := vk.CreateSwapchainImageViews(device, swapImages, swapFormat)
 		if err != nil {
@@ -268,7 +268,7 @@ func main() {
 			}
 		}()
 
-		fmt.Printf("  Image views: %d\n", len(swapImageViews))
+		//fmt.Printf("  Image views: %d\n", len(swapImageViews))
 
 		compiler := shaderc.NewCompiler()
 		defer compiler.Release()
@@ -468,7 +468,7 @@ func main() {
 		textureData := imageData.Pixels
 		textureSize := uint64(len(textureData))
 
-		fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, textureHeight, textureSize)
+		//fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, textureHeight, textureSize)
 
 		// Create staging buffer
 		stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(

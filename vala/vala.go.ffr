@@ -563,7 +563,7 @@ func LoadImage(path string) (*ImageData, error) {
 		return nil, fmt.Errorf("failed to decode image: %v", err)
 	}
 
-	fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
+	//fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
 
 	// Convert to RGBA
 	bounds := img.Bounds()
@@ -609,7 +609,7 @@ func CreateImageLayer(
 		return 0, fmt.Errorf("failed to load image: %v", err)
 	}
 
-	fmt.Printf("Creating layer from: %s (%dx%d)\n", imagePath, imageData.Width, imageData.Height)
+	//fmt.Printf("Creating layer from: %s (%dx%d)\n", imagePath, imageData.Width, imageData.Height)
 
 	textureWidth := imageData.Width
 	textureHeight := imageData.Height
@@ -903,7 +903,7 @@ func CreateImageLayer(
 	if *nextTextureIndex >= maxTextures {
 		return entity, fmt.Errorf("exceeded maximum texture count: %d", maxTextures)
 	}
-	fmt.Printf("Assigned texture index %d to new layer\n", textureIndex)
+	//fmt.Printf("Assigned texture index %d to new layer\n", textureIndex)
 
 	// Upload SOURCE TEXTURE to global bindless descriptor set
 	// (For simple image layers, we composite the source directly, not a rendered framebuffer)
@@ -929,7 +929,7 @@ func CreateImageLayer(
 	texData := world.GetTextureData(entity)
 	texData.TextureIndex = textureIndex
 
-	fmt.Printf("Created layer entity %d from %s\n", entity, imagePath)
+	//fmt.Printf("Created layer entity %d from %s\n", entity, imagePath)
 	return entity, nil
 }
 
@@ -957,11 +957,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("Required Vulkan extensions: %v\n", exts)
+	//fmt.Printf("Required Vulkan extensions: %v\n", exts)
 
 	// Create Vulkan instance WITH the required extensions
 	version, _ := vk.EnumerateInstanceVersion()
-	fmt.Printf("Vulkan %d.%d.%d\n",
+	//fmt.Printf("Vulkan %d.%d.%d\n",
 		vk.ApiVersionMajor(version),
 		vk.ApiVersionMinor(version),
 		vk.ApiVersionPatch(version))
@@ -982,7 +982,7 @@ func main() {
 	defer instance.Destroy()
 
 	devices, _ := instance.EnumeratePhysicalDevices()
-	fmt.Printf("Found %d physical devices\n", len(devices))
+	//fmt.Printf("Found %d physical devices\n", len(devices))
 
 	// Create the surface
 	surfHandle, err := window.VulkanCreateSurface(instance.Handle())
@@ -990,7 +990,7 @@ func main() {
 		panic(err)
 	}
 	surface := vk.NewSurfaceKHR(surfHandle)
-	fmt.Printf("Created Vulkan surface: %v\n", surface)
+	//fmt.Printf("Created Vulkan surface: %v\n", surface)
 
 	// Test surface queries with first physical device
 	if len(devices) > 0 {
@@ -1001,19 +1001,19 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nSurface Capabilities:\n")
-		fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
-		fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
+		//fmt.Printf("\nSurface Capabilities:\n")
+		//fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
+		//fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
 
 		// Query surface formats
 		formats, err := device.GetSurfaceFormatsKHR(surface)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nAvailable formats: %d\n", len(formats))
+		//fmt.Printf("\nAvailable formats: %d\n", len(formats))
 		for i, format := range formats {
 			if i < 3 { // Just print first 3
-				fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
+				//fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
 			}
 		}
 
@@ -1022,9 +1022,9 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nAvailable present modes: %d\n", len(modes))
+		//fmt.Printf("\nAvailable present modes: %d\n", len(modes))
 		for _, mode := range modes {
-			fmt.Printf("  Mode: %d\n", mode)
+			//fmt.Printf("  Mode: %d\n", mode)
 		}
 	}
 
@@ -1033,11 +1033,11 @@ func main() {
 
 		// Find a graphics queue family that supports presentation
 		queueFamilies := physicalDevice.GetQueueFamilyProperties()
-		fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
+		//fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
 
 		graphicsFamily := -1
 		for i, family := range queueFamilies {
-			fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
+			//fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
 
 			// Check if supports graphics
 			if family.QueueFlags&vk.QUEUE_GRAPHICS_BIT != 0 {
@@ -1053,13 +1053,13 @@ func main() {
 			panic("No suitable queue family found!")
 		}
 
-		fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
+		//fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
 
 		// Query physical device features to check for sparse binding support
 		features := physicalDevice.GetFeatures()
-		fmt.Printf("\nSparse binding support:\n")
-		fmt.Printf("  sparseBinding: %v\n", features.SparseBinding)
-		fmt.Printf("  sparseResidencyImage2D: %v\n", features.SparseResidencyImage2D)
+		//fmt.Printf("\nSparse binding support:\n")
+		//fmt.Printf("  sparseBinding: %v\n", features.SparseBinding)
+		//fmt.Printf("  sparseResidencyImage2D: %v\n", features.SparseResidencyImage2D)
 
 		if !features.SparseBinding || !features.SparseResidencyImage2D {
 			fmt.Println("WARNING: Sparse binding not supported! Falling back to dense canvas.")
@@ -1100,7 +1100,7 @@ func main() {
 		fmt.Println("Logical device created!")
 
 		queue := device.GetQueue(uint32(graphicsFamily), 0)
-		fmt.Printf("Got queue: %v\n", queue)
+		//fmt.Printf("Got queue: %v\n", queue)
 
 		// Create swapchain
 		swapchain, swapFormat, swapExtent, err := vk.CreateSwapchain(
@@ -1115,16 +1115,16 @@ func main() {
 		}
 		defer device.DestroySwapchainKHR(swapchain)
 
-		fmt.Printf("\nSwapchain created!\n")
-		fmt.Printf("  Format: %d\n", swapFormat)
-		fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
+		//fmt.Printf("\nSwapchain created!\n")
+		//fmt.Printf("  Format: %d\n", swapFormat)
+		//fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
 
 		// Get swapchain images
 		swapImages, err := device.GetSwapchainImagesKHR(swapchain)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("  Images: %d\n", len(swapImages))
+		//fmt.Printf("  Images: %d\n", len(swapImages))
 
 		swapImageViews, err := vk.CreateSwapchainImageViews(device, swapImages, swapFormat)
 		if err != nil {
@@ -1136,7 +1136,7 @@ func main() {
 			}
 		}()
 
-		fmt.Printf("  Image views: %d\n", len(swapImageViews))
+		//fmt.Printf("  Image views: %d\n", len(swapImageViews))
 
 		compiler := shaderc.NewCompiler()
 		defer compiler.Release()
@@ -1189,8 +1189,8 @@ func main() {
 			maxTextures = maxTexturesCap
 		}
 
-		fmt.Printf("\n🎨 BINDLESS TEXTURES ENABLED!\n")
-		fmt.Printf("GPU reports %d sampled images, using %d (capped for compatibility)\n", gpuLimit, maxTextures)
+		//fmt.Printf("\n🎨 BINDLESS TEXTURES ENABLED!\n")
+		//fmt.Printf("GPU reports %d sampled images, using %d (capped for compatibility)\n", gpuLimit, maxTextures)
 
 		const texturesPerBinding = 16384
 		// Create MULTI-BINDING BINDLESS descriptor set layout
@@ -1966,8 +1966,8 @@ func main() {
 		// 1 set with 8 bindings × 16K textures = 131K total capacity
 		const numBindings = 8
 		totalTextureCapacity := texturesPerBinding * numBindings
-		fmt.Printf("Creating multi-binding bindless descriptor pool:\n")
-		fmt.Printf("  - %d bindings × %d textures = %d total capacity\n", numBindings, texturesPerBinding, totalTextureCapacity)
+		//fmt.Printf("Creating multi-binding bindless descriptor pool:\n")
+		//fmt.Printf("  - %d bindings × %d textures = %d total capacity\n", numBindings, texturesPerBinding, totalTextureCapacity)
 		bindlessDescriptorPool, err := device.CreateDescriptorPool(&vk.DescriptorPoolCreateInfo{
 			MaxSets: 1, // Only ONE descriptor set needed for bindless!
 			PoolSizes: []vk.DescriptorPoolSize{
@@ -1988,7 +1988,7 @@ func main() {
 			panic(err)
 		}
 		globalBindlessDescriptorSet := bindlessDescriptorSets[0]
-		fmt.Printf("✨ Global bindless descriptor set allocated!\n\n")
+		//fmt.Printf("✨ Global bindless descriptor set allocated!\n\n")
 
 		// Texture index management for bindless rendering
 		var nextTextureIndex uint32 = 0
@@ -2185,10 +2185,10 @@ func main() {
 		}
 		defer paintCanvasB.Destroy()
 
-		fmt.Printf("Paint canvases created: %dx%d (ping-pong buffers)\n", paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
+		//fmt.Printf("Paint canvases created: %dx%d (ping-pong buffers)\n", paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
 
 		// Pre-allocate all sparse pages
-		fmt.Printf("%d: Starting canvas initialization...\n", time.Now().UnixMilli())
+		//fmt.Printf("%d: Starting canvas initialization...\n", time.Now().UnixMilli())
 		err = paintCanvasA.AllocateAll()
 		if err != nil {
 			panic(fmt.Sprintf("Failed to allocate canvas A pages: %v", err))
@@ -2285,7 +2285,7 @@ void main() {
 		defer device.DestroyDescriptorPool(clearDescPool)
 
 		// Clear both canvases using compute shader
-		fmt.Printf("%d: Clearing canvases with compute shader...\n", time.Now().UnixMilli())
+		//fmt.Printf("%d: Clearing canvases with compute shader...\n", time.Now().UnixMilli())
 
 		for _, cvs := range []canvas.Canvas{paintCanvasA, paintCanvasB} {
 			// Allocate descriptor set
@@ -2405,7 +2405,7 @@ void main() {
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 		}
 
-		fmt.Printf("%d: Both canvases cleared with compute shader!\n", time.Now().UnixMilli())
+		//fmt.Printf("%d: Both canvases cleared with compute shader!\n", time.Now().UnixMilli())
 
 		// Ping-pong state: tracks which canvas is source (read) and which is destination (write)
 		paintCanvas := paintCanvasA       // Start with A as current (destination)
@@ -2577,7 +2577,7 @@ void main() {
 				},
 			})
 		}
-		fmt.Printf("Frame 0 initialized with texture index %d\n", frame0TextureIndex)
+		//fmt.Printf("Frame 0 initialized with texture index %d\n", frame0TextureIndex)
 
 		// === Frame Switching Functions ===
 		// saveCurrentFrame copies paintCanvas content to the current frame's texture storage
@@ -2585,11 +2585,11 @@ void main() {
 			currentFrame := timeline.CurrentFrame
 			frameTexture := frameTextures[currentFrame]
 			if frameTexture == nil {
-				fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
+				//fmt.Printf("Warning: No texture for frame %d to save to\n", currentFrame)
 				return
 			}
 
-			fmt.Printf("Saving frame %d...\n", currentFrame)
+			//fmt.Printf("Saving frame %d...\n", currentFrame)
 
 			// Copy paintCanvas to frameTexture using a blit operation
 			cmdBufs := device.AllocateCommandBuffers(commandPool, 1)
@@ -2724,7 +2724,7 @@ void main() {
 			queue.WaitIdle()
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
-			fmt.Printf("Frame %d saved successfully\n", currentFrame)
+			//fmt.Printf("Frame %d saved successfully\n", currentFrame)
 		}
 
 		// loadFrame copies a frame's texture storage to paintCanvas
@@ -2732,7 +2732,7 @@ void main() {
 			frameTexture := frameTextures[frameNum]
 			if frameTexture == nil {
 				// Frame doesn't exist yet - create a blank frame
-				fmt.Printf("Frame %d doesn't exist, creating blank frame...\n", frameNum)
+				//fmt.Printf("Frame %d doesn't exist, creating blank frame...\n", frameNum)
 
 				newImage, newMemory, err := device.CreateImageWithMemory(
 					paintCanvasA.GetWidth(),
@@ -2850,7 +2850,7 @@ void main() {
 				frameTexture = frameTextures[frameNum]
 			}
 
-			fmt.Printf("Loading frame %d...\n", frameNum)
+			//fmt.Printf("Loading frame %d...\n", frameNum)
 
 			// Copy frameTexture to paintCanvas
 			cmdBufs := device.AllocateCommandBuffers(commandPool, 1)
@@ -2985,23 +2985,23 @@ void main() {
 			queue.WaitIdle()
 			device.FreeCommandBuffers(commandPool, cmdBufs)
 
-			fmt.Printf("Frame %d loaded successfully\n", frameNum)
+			//fmt.Printf("Frame %d loaded successfully\n", frameNum)
 		}
 
 		// switchToFrame changes the current frame (saves current, loads new)
 		switchToFrame := func(newFrame int) {
 			if newFrame < 0 || newFrame >= timeline.TotalFrames {
-				fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
+				//fmt.Printf("Frame %d out of range (0-%d)\n", newFrame, timeline.TotalFrames-1)
 				return
 			}
 
 			if newFrame == timeline.CurrentFrame {
-				fmt.Printf("Already on frame %d\n", newFrame)
+				//fmt.Printf("Already on frame %d\n", newFrame)
 				return
 			}
 
 			oldFrame := timeline.CurrentFrame
-			fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
+			//fmt.Printf("Switching from frame %d to frame %d\n", oldFrame, newFrame)
 
 			// Save current frame
 			saveCurrentFrame()
@@ -3012,7 +3012,7 @@ void main() {
 			// Load new frame
 			loadFrame(newFrame)
 
-			fmt.Printf("Now on frame %d\n", timeline.CurrentFrame)
+			//fmt.Printf("Now on frame %d\n", timeline.CurrentFrame)
 		}
 
 		// Initialize paintCanvas with frame 0's content
@@ -3065,7 +3065,7 @@ void main() {
 				IsValid:     false,
 			}
 		}
-		fmt.Printf("Allocated %d snapshot images (%dx%d each)\n", maxSnapshots, paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
+		//fmt.Printf("Allocated %d snapshot images (%dx%d each)\n", maxSnapshots, paintCanvasA.GetWidth(), paintCanvasA.GetHeight())
 
 		// Create sampler for paint canvas with anisotropic filtering for smoother zoom
 		canvasSampler, err := device.CreateSampler(&vk.SamplerCreateInfo{
@@ -3115,7 +3115,7 @@ void main() {
 		textureData := imageData.Pixels
 		atlasSize := uint64(len(textureData))
 
-		fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, atlasHeight, atlasSize)
+		//fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, atlasHeight, atlasSize)
 
 		// Create staging buffer
 		stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(
@@ -3281,7 +3281,7 @@ void main() {
 		if err != nil {
 			panic(fmt.Sprintf("Failed to generate SDF atlas: %v", err))
 		}
-		fmt.Printf("Generated SDF atlas: %dx%d with %d characters\n",
+		//fmt.Printf("Generated SDF atlas: %dx%d with %d characters\n",
 			sdfAtlas.Width, sdfAtlas.Height, len(sdfAtlas.Chars))
 
 		// Upload SDF atlas to GPU
@@ -3752,11 +3752,11 @@ void main() {
 			FPS:          24.0,  // Default to 24 fps (traditional animation framerate)
 			IsPlaying:    false, // Not playing by default
 		}
-		fmt.Printf("Timeline created: %d frames at %.1f FPS\n", timeline.TotalFrames, timeline.FPS)
+		//fmt.Printf("Timeline created: %d frames at %.1f FPS\n", timeline.TotalFrames, timeline.FPS)
 
 		// Create a layer entity for the Djungelskog texture
 		layer1 := world.CreateEntity()
-		fmt.Printf("Created layer entity: %d\n", layer1)
+		//fmt.Printf("Created layer entity: %d\n", layer1)
 
 		// Add Transform component
 		transform1 := ecs.NewTransform()
@@ -3775,7 +3775,7 @@ void main() {
 		// Add TextureData component (Djungelskog texture)
 		// Assign bindless texture index for layer1
 		layer1TextureIndex := assignNextTextureIndex()
-		fmt.Printf("Assigned texture index %d to layer1\n", layer1TextureIndex)
+		//fmt.Printf("Assigned texture index %d to layer1\n", layer1TextureIndex)
 
 		// Upload texture to global bindless descriptor set
 		// Calculate which binding and array index to use for multi-binding architecture
@@ -3808,7 +3808,7 @@ void main() {
 		// Add BlendMode component (visible, opaque)
 		world.AddBlendMode(layer1, ecs.NewBlendMode())
 
-		fmt.Printf("Layer 1 configured with %d components\n", 4)
+		//fmt.Printf("Layer 1 configured with %d components\n", 4)
 
 		// Create framebuffer for layer 1
 		layer1Image, layer1ImageMemory, err := device.CreateImageWithMemory(
@@ -3856,7 +3856,7 @@ void main() {
 		// ===== Create Background Layer =====
 		fmt.Println("\n=== Creating Background Layer ===")
 		layerBg := world.CreateEntity()
-		fmt.Printf("Created background layer entity: %d\n", layerBg)
+		//fmt.Printf("Created background layer entity: %d\n", layerBg)
 
 		// Add Transform component (ZIndex 0 - between bear and paint layer)
 		transformBg := ecs.NewTransform()
@@ -3908,7 +3908,7 @@ void main() {
 
 		// Assign bindless texture index for background layer
 		layerBgTextureIndex := assignNextTextureIndex()
-		fmt.Printf("Assigned texture index %d to background layer\n", layerBgTextureIndex)
+		//fmt.Printf("Assigned texture index %d to background layer\n", layerBgTextureIndex)
 
 		// Upload background layer framebuffer to global bindless descriptor set
 		bindingBg := layerBgTextureIndex / texturesPerBinding
@@ -3949,11 +3949,11 @@ void main() {
 		// Add BlendMode component (visible, opaque)
 		world.AddBlendMode(layerBg, ecs.NewBlendMode())
 
-		fmt.Printf("Background layer configured\n")
+		//fmt.Printf("Background layer configured\n")
 
 		// Create a second layer entity (demonstrating multi-layer support)
 		layer2 := world.CreateEntity()
-		fmt.Printf("Created layer entity: %d\n", layer2)
+		//fmt.Printf("Created layer entity: %d\n", layer2)
 
 		// Add Transform component (with higher ZIndex to be in front)
 		transform2 := ecs.NewTransform()
@@ -3973,7 +3973,7 @@ void main() {
 		// Layer2 displays the active paintCanvas (so we see live painting)
 		// Frame textures are used for storage when switching frames
 		layer2TextureIndex := assignNextTextureIndex()
-		fmt.Printf("Assigned texture index %d to layer2 (paint canvas)\n", layer2TextureIndex)
+		//fmt.Printf("Assigned texture index %d to layer2 (paint canvas)\n", layer2TextureIndex)
 
 		// Upload paintCanvas texture to global bindless descriptor set
 		binding2 := layer2TextureIndex / texturesPerBinding
@@ -4001,7 +4001,7 @@ void main() {
 			Height:       paintCanvas.GetHeight(),
 			TextureIndex: layer2TextureIndex, // Bindless texture array index
 		})
-		fmt.Printf("Layer2 displays paintCanvas (live painting visible)\n")
+		//fmt.Printf("Layer2 displays paintCanvas (live painting visible)\n")
 
 		// Add BlendMode component with different opacity
 		blendMode2 := ecs.NewBlendMode()
@@ -4052,13 +4052,13 @@ void main() {
 			Height:      swapExtent.Height,
 		})
 
-		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
-		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
+		//fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
+		//fmt.Printf("Total entities in world: %d\n", world.EntityCount())
 
 		// ===== TEST: Create a layer group and put bear inside it =====
 		fmt.Println("\n=== Creating Test Layer Group ===")
 		testGroup := world.CreateEntity()
-		fmt.Printf("Created test group entity: %d\n", testGroup)
+		//fmt.Printf("Created test group entity: %d\n", testGroup)
 
 		// Add LayerGroup component
 		world.AddLayerGroup(testGroup, ecs.NewLayerGroup())
@@ -4113,7 +4113,7 @@ void main() {
 
 		// Assign bindless texture index for the group
 		groupTextureIndex := assignNextTextureIndex()
-		fmt.Printf("Assigned texture index %d to test group\n", groupTextureIndex)
+		//fmt.Printf("Assigned texture index %d to test group\n", groupTextureIndex)
 
 		// Upload group framebuffer to global bindless descriptor set
 		bindingGroup := groupTextureIndex / texturesPerBinding
@@ -4158,13 +4158,13 @@ void main() {
 
 		// Add the bear (layer1) as a child of this group
 		world.AddChildToGroup(testGroup, layer1)
-		fmt.Printf("Added bear (layer1=%d) as child of test group\n", layer1)
+		//fmt.Printf("Added bear (layer1=%d) as child of test group\n", layer1)
 
 		// Verify the relationship
 		children := world.GetChildren(testGroup)
 		parent := world.GetParent(layer1)
-		fmt.Printf("Test group children: %v\n", children.ChildEntities)
-		fmt.Printf("Bear's parent: %d (should be %d)\n", parent.ParentEntity, testGroup)
+		//fmt.Printf("Test group children: %v\n", children.ChildEntities)
+		//fmt.Printf("Bear's parent: %d (should be %d)\n", parent.ParentEntity, testGroup)
 
 		// Create "Hello World!" text entity
 		helloText := world.CreateEntity()
@@ -4223,7 +4223,7 @@ void main() {
 		undoButtonComponent.ColorPressed = [4]float32{0.1, 0.2, 0.5, 0.9} // Blue
 		world.AddUIButton(undoButton, undoButtonComponent)
 		world.AddScreenSpace(undoButton, ecs.NewScreenSpace()) // Make it screen-space
-		fmt.Printf("=== UNDO BUTTON CREATED: Entity=%d, Position=(%.1f,%.1f), Size=(%.1f×%.1f) ===\n",
+		//fmt.Printf("=== UNDO BUTTON CREATED: Entity=%d, Position=(%.1f,%.1f), Size=(%.1f×%.1f) ===\n",
 			undoButton, undoButtonComponent.X, undoButtonComponent.Y, undoButtonComponent.Width, undoButtonComponent.Height)
 
 		// Create Redo button (action-based)
@@ -4250,7 +4250,7 @@ void main() {
 			btn := world.GetUIButton(entity)
 			screenSp := world.GetScreenSpace(entity)
 			isScreenSpace := screenSp != nil && screenSp.Enabled
-			fmt.Printf("  Entity %d: '%s' at (%.0f,%.0f) size %.0f×%.0f, Enabled=%v, ScreenSpace=%v\n",
+			//fmt.Printf("  Entity %d: '%s' at (%.0f,%.0f) size %.0f×%.0f, Enabled=%v, ScreenSpace=%v\n",
 				entity, btn.Label, btn.X, btn.Y, btn.Width, btn.Height, btn.Enabled, isScreenSpace)
 		}
 		fmt.Println("===========================\n")
@@ -4271,7 +4271,7 @@ void main() {
 		// Helper function to create a UI layer
 		createUILayer := func(name string, zindex int) (ecs.Entity, vk.Image, vk.ImageView, vk.DeviceMemory) {
 			layer := world.CreateEntity()
-			fmt.Printf("Created UI layer '%s' (entity %d, zindex 0x%x)\n", name, layer, zindex)
+			//fmt.Printf("Created UI layer '%s' (entity %d, zindex 0x%x)\n", name, layer, zindex)
 
 			// Add Transform component
 			transform := ecs.NewTransform()
@@ -4361,7 +4361,7 @@ void main() {
 			// Add BlendMode component (fully opaque and visible)
 			world.AddBlendMode(layer, ecs.NewBlendMode())
 
-			fmt.Printf("UI layer '%s' configured (texture index %d)\n", name, textureIndex)
+			//fmt.Printf("UI layer '%s' configured (texture index %d)\n", name, textureIndex)
 			return layer, layerImage, layerImageView, layerImageMemory
 		}
 
@@ -4389,7 +4389,7 @@ void main() {
 		world.MakeScreenSpace(colorPickerLayer, true)
 
 		// Note: Old uiLayer variable removed - now using uiButtonBaseLayer and uiButtonTextLayer
-		fmt.Printf("Created %d UI layers for multi-layer rendering\n", 3)
+		//fmt.Printf("Created %d UI layers for multi-layer rendering\n", 3)
 
 		// === Initial Image Layout Transitions ===
 		// Transition layer framebuffers from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL
@@ -4622,7 +4622,7 @@ void main() {
 									colorPicker.Saturation = 1.0 - (mouseX-svBoxX)/svBoxSize
 									colorPicker.Value = 1.0 - (mouseY-svBoxY)/svBoxSize
 									r, g, b := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
-									fmt.Printf("Color selected: RGB(%.2f, %.2f, %.2f)\n", r, g, b)
+									//fmt.Printf("Color selected: RGB(%.2f, %.2f, %.2f)\n", r, g, b)
 								} else if mouseX >= hueWheelX && mouseX <= hueWheelX+hueWheelSize &&
 									mouseY >= hueWheelY && mouseY <= hueWheelY+hueWheelSize {
 									// Check if clicking on hue wheel ring
@@ -4643,7 +4643,7 @@ void main() {
 										}
 										colorPicker.Hue = hue
 										r, g, b := hsv2rgb(colorPicker.Hue, colorPicker.Saturation, colorPicker.Value)
-										fmt.Printf("Hue selected: %.2f (RGB: %.2f, %.2f, %.2f)\n", hue, r, g, b)
+										//fmt.Printf("Hue selected: %.2f (RGB: %.2f, %.2f, %.2f)\n", hue, r, g, b)
 									}
 								}
 							}
@@ -4726,7 +4726,7 @@ void main() {
 								}
 								blendMode.Opacity = newOpacity
 								actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
-								fmt.Printf("Layer opacity increased to %.2f\n", newOpacity)
+								//fmt.Printf("Layer opacity increased to %.2f\n", newOpacity)
 							}
 						}
 
@@ -4742,7 +4742,7 @@ void main() {
 								}
 								blendMode.Opacity = newOpacity
 								actionRecorder.RecordLayerOpacity(layer2, oldOpacity, newOpacity)
-								fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
+								//fmt.Printf("Layer opacity decreased to %.2f\n", newOpacity)
 							}
 						}
 
@@ -4757,12 +4757,12 @@ void main() {
 						}
 
 					case sdl.EVENT_DROP_COMPLETE:
-						fmt.Printf("File loaded!")
+						//fmt.Printf("File loaded!")
 
 					case sdl.EVENT_DROP_TEXT, sdl.EVENT_DROP_FILE:
 						drop := event.Drop
 						filePath := drop.Data
-						fmt.Printf("File dropped: %s\n", filePath)
+						//fmt.Printf("File dropped: %s\n", filePath)
 
 						// Check if it's an image file
 						ext := strings.ToLower(filepath.Ext(filePath))
@@ -4787,12 +4787,12 @@ void main() {
 								currentLayer,
 							)
 							if err != nil {
-								fmt.Printf("Failed to create layer: %v\n", err)
+								//fmt.Printf("Failed to create layer: %v\n", err)
 							} else {
 								currentLayer++
 							}
 						} else {
-							fmt.Printf("Unsupported file type: %s\n", ext)
+							//fmt.Printf("Unsupported file type: %s\n", ext)
 						}
 					}
 				}
@@ -4849,13 +4849,13 @@ void main() {
 
 			// === ACTION-BASED REPLAY: Clear and redraw all strokes ===
 			if replayRequested {
-				fmt.Printf("\n=== REPLAY TRIGGERED ===\n")
-				fmt.Printf("Replaying canvas: %d actions\n", actionRecorder.GetIndex())
+				//fmt.Printf("\n=== REPLAY TRIGGERED ===\n")
+				//fmt.Printf("Replaying canvas: %d actions\n", actionRecorder.GetIndex())
 
 				// Reset canvas pointers to initial state before replay
 				paintCanvas = paintCanvasA
 				paintCanvasSource = paintCanvasB
-				fmt.Printf("Reset: paintCanvas = A (%v), paintCanvasSource = B (%v)\n",
+				//fmt.Printf("Reset: paintCanvas = A (%v), paintCanvasSource = B (%v)\n",
 					paintCanvas.GetImage(), paintCanvasSource.GetImage())
 
 				// Note: Don't reset layer2 opacity/visibility here!
@@ -4998,9 +4998,9 @@ void main() {
 				targetIndex := len(history)
 
 				// === Find nearest snapshot before target index ===
-				fmt.Printf("[SNAPSHOT DEBUG] Looking for snapshots before target index %d:\n", targetIndex)
+				//fmt.Printf("[SNAPSHOT DEBUG] Looking for snapshots before target index %d:\n", targetIndex)
 				for i := range snapshots {
-					fmt.Printf("  Snapshot %d: Valid=%v, ActionIndex=%d\n", i, snapshots[i].IsValid, snapshots[i].ActionIndex)
+					//fmt.Printf("  Snapshot %d: Valid=%v, ActionIndex=%d\n", i, snapshots[i].IsValid, snapshots[i].ActionIndex)
 				}
 				var bestSnapshot *CanvasSnapshot = nil
 				bestSnapshotSlot := -1
@@ -5018,7 +5018,7 @@ void main() {
 
 				startIdx := 0 // Start replaying from beginning
 				if bestSnapshot != nil {
-					fmt.Printf("[SNAPSHOT] Found snapshot at action %d (slot %d), skipping %d actions!\n",
+					//fmt.Printf("[SNAPSHOT] Found snapshot at action %d (slot %d), skipping %d actions!\n",
 						bestSnapshot.ActionIndex, bestSnapshotSlot, bestSnapshot.ActionIndex)
 					startIdx = bestSnapshot.ActionIndex
 
@@ -5101,7 +5101,7 @@ void main() {
 					// IMPORTANT: Also copy snapshot to paintCanvasA (destination)!
 					// The brush shader only writes pixels covered by stamps, so uncovered pixels
 					// in the destination need to have the snapshot content as background.
-					fmt.Printf("[SNAPSHOT] Also copying snapshot to paintCanvasA (destination) for proper background\n")
+					//fmt.Printf("[SNAPSHOT] Also copying snapshot to paintCanvasA (destination) for proper background\n")
 					cmd.PipelineBarrier(
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
 						vk.PIPELINE_STAGE_TRANSFER_BIT,
@@ -5176,14 +5176,14 @@ void main() {
 						},
 					)
 
-					fmt.Printf("[SNAPSHOT] Canvas restored from snapshot to BOTH A and B\n")
+					//fmt.Printf("[SNAPSHOT] Canvas restored from snapshot to BOTH A and B\n")
 				}
 
-				fmt.Printf("[SNAPSHOT DEBUG] Starting replay of %d actions (from index %d to %d)\n", len(history), startIdx, targetIndex)
+				//fmt.Printf("[SNAPSHOT DEBUG] Starting replay of %d actions (from index %d to %d)\n", len(history), startIdx, targetIndex)
 				if bestSnapshot != nil {
-					fmt.Printf("[SNAPSHOT DEBUG] Using snapshot from slot with ActionIndex=%d (skipping stroke rendering for actions 0-%d)\n", bestSnapshot.ActionIndex, startIdx-1)
+					//fmt.Printf("[SNAPSHOT DEBUG] Using snapshot from slot with ActionIndex=%d (skipping stroke rendering for actions 0-%d)\n", bestSnapshot.ActionIndex, startIdx-1)
 				} else {
-					fmt.Printf("[SNAPSHOT DEBUG] No snapshot found, replaying from scratch\n")
+					//fmt.Printf("[SNAPSHOT DEBUG] No snapshot found, replaying from scratch\n")
 				}
 				// Always process ALL actions to ensure layer state changes are applied!
 				// But only render strokes starting from startIdx (snapshot covers earlier strokes)
@@ -5195,7 +5195,7 @@ void main() {
 					case ActionTypeStroke:
 						// Skip strokes that are already in the snapshot
 						if actionIdx < startIdx {
-							fmt.Printf("  Skipping stroke %d/%d (covered by snapshot)\n", actionIdx+1, len(history))
+							//fmt.Printf("  Skipping stroke %d/%d (covered by snapshot)\n", actionIdx+1, len(history))
 							continue
 						}
 
@@ -5204,7 +5204,7 @@ void main() {
 							continue
 						}
 						stroke := action.Stroke
-						fmt.Printf("  Replaying stroke %d/%d: %d stamps\n", actionIdx+1, len(history), len(stroke.States))
+						//fmt.Printf("  Replaying stroke %d/%d: %d stamps\n", actionIdx+1, len(history), len(stroke.States))
 
 						// Step 1: Collect ALL stamps for the entire stroke
 						var stamps []struct {
@@ -5372,7 +5372,7 @@ void main() {
 
 							// Debug first stamp of first stroke
 							if actionIdx == 0 && stampIdx == 0 {
-								fmt.Printf("    First stamp: pos=(%.1f, %.1f) radius=%.1f pressure=%.3f size=%.1f color=(%.1f,%.1f,%.1f,%.1f) canvas=%dx%d\n",
+								//fmt.Printf("    First stamp: pos=(%.1f, %.1f) radius=%.1f pressure=%.3f size=%.1f color=(%.1f,%.1f,%.1f,%.1f) canvas=%dx%d\n",
 									pushConstants.BrushX, pushConstants.BrushY, stroke.Radius, stamp.pressure, pushConstants.BrushSize,
 									pushConstants.ColorR, pushConstants.ColorG, pushConstants.ColorB, pushConstants.ColorA,
 									int(pushConstants.CanvasWidth), int(pushConstants.CanvasHeight))
@@ -5514,7 +5514,7 @@ void main() {
 						// Ping-pong swap (only if not the last stroke!)
 						// Don't swap on the last stroke so paintCanvas points to the final result
 						if !isLastStroke {
-							fmt.Printf("    Swapping canvases for next stroke\n")
+							//fmt.Printf("    Swapping canvases for next stroke\n")
 							paintCanvas, paintCanvasSource = paintCanvasSource, paintCanvas
 
 							// Update descriptor set for next stroke
@@ -5539,7 +5539,7 @@ void main() {
 						// After swap (if swapped), result is in paintCanvasSource
 						// If no swap (last stroke), result is in paintCanvas
 						if (actionIdx+1)%snapshotInterval == 0 {
-							fmt.Printf("[SNAPSHOT] Saving canvas state at ActionIndex=%d (slot %d), isLastStroke=%v, targetIdx=%d\n",
+							//fmt.Printf("[SNAPSHOT] Saving canvas state at ActionIndex=%d (slot %d), isLastStroke=%v, targetIdx=%d\n",
 								actionIdx+1, nextSnapshotSlot, isLastStroke, targetIndex)
 
 							// Determine which canvas has the result
@@ -5554,7 +5554,7 @@ void main() {
 								resultCanvas = paintCanvas
 								canvasName = "paintCanvas"
 							}
-							fmt.Printf("[SNAPSHOT] Copying from %s to snapshot slot %d\n", canvasName, nextSnapshotSlot)
+							//fmt.Printf("[SNAPSHOT] Copying from %s to snapshot slot %d\n", canvasName, nextSnapshotSlot)
 
 							// Copy result canvas to snapshot
 							// IMPORTANT: Snapshot might be in TRANSFER_SRC if previously used!
@@ -5692,7 +5692,7 @@ void main() {
 									// Hiding: set to 0
 									blend.Opacity = 0.0
 								}
-								fmt.Printf("Replay: Set layer %d visibility to %v (opacity=%.1f, saved=%.1f)\n",
+								//fmt.Printf("Replay: Set layer %d visibility to %v (opacity=%.1f, saved=%.1f)\n",
 									action.LayerVisibility.EntityID, blend.Visible, blend.Opacity, blend.SavedOpacity)
 							}
 						}
@@ -5702,7 +5702,7 @@ void main() {
 						if action.LayerOpacity != nil {
 							if blend := world.GetBlendMode(action.LayerOpacity.EntityID); blend != nil {
 								blend.Opacity = action.LayerOpacity.NewOpacity
-								fmt.Printf("Replay: Set layer %d opacity to %.2f\n",
+								//fmt.Printf("Replay: Set layer %d opacity to %.2f\n",
 									action.LayerOpacity.EntityID, blend.Opacity)
 							}
 						}
@@ -5712,7 +5712,7 @@ void main() {
 						if action.LayerTransform != nil {
 							if transform := world.GetTransform(action.LayerTransform.EntityID); transform != nil {
 								*transform = action.LayerTransform.NewTransform
-								fmt.Printf("Replay: Set layer %d transform\n", action.LayerTransform.EntityID)
+								//fmt.Printf("Replay: Set layer %d transform\n", action.LayerTransform.EntityID)
 							}
 						}
 
@@ -5727,13 +5727,13 @@ void main() {
 				}
 
 				replayRequested = false
-				fmt.Printf("Replay complete: rendered %d actions\n", actionRecorder.GetIndex())
+				//fmt.Printf("Replay complete: rendered %d actions\n", actionRecorder.GetIndex())
 
 				// Update layer2's texture to point to the current paintCanvas after replay
-				fmt.Printf("Updating layer2 texture to point to paintCanvas (result canvas)\n")
+				//fmt.Printf("Updating layer2 texture to point to paintCanvas (result canvas)\n")
 				layer2Texture := world.GetTextureData(layer2)
 				if layer2Texture != nil {
-					fmt.Printf("  Old image: %v, New image: %v\n", layer2Texture.Image, paintCanvas.GetImage())
+					//fmt.Printf("  Old image: %v, New image: %v\n", layer2Texture.Image, paintCanvas.GetImage())
 					layer2Texture.Image = paintCanvas.GetImage()
 					layer2Texture.ImageView = paintCanvas.GetView()
 
@@ -5765,7 +5765,7 @@ void main() {
 				isFirstFrameOfStroke = true // Skip interpolation on first frame
 				strokeFrameCount = 0        // Reset frame counter
 
-				fmt.Printf("=== Stroke started (action-based undo) ===\n")
+				//fmt.Printf("=== Stroke started (action-based undo) ===\n")
 			}
 
 			cXLast, cYLast := float32(0.0), float32(0.0)
@@ -6036,7 +6036,7 @@ void main() {
 
 					// Debug: Print color on first stamp of stroke
 					if i == 0 && strokeFrameCount == 1 {
-						fmt.Printf("[BRUSH] HSV(%.2f, %.2f, %.2f) -> RGB(%.2f, %.2f, %.2f)\n",
+						//fmt.Printf("[BRUSH] HSV(%.2f, %.2f, %.2f) -> RGB(%.2f, %.2f, %.2f)\n",
 							colorPicker.Hue, colorPicker.Saturation, colorPicker.Value,
 							brushR, brushG, brushB)
 					}
@@ -6342,7 +6342,7 @@ void main() {
 				if world.IsGroup(entity) {
 					// Render layer group - composite all children to group's framebuffer
 					if frameCounter%60 == 0 {
-						fmt.Printf("[GROUP] Rendering layer group (entity %d)\n", entity)
+						//fmt.Printf("[GROUP] Rendering layer group (entity %d)\n", entity)
 					}
 
 					children := world.GetChildren(entity)
@@ -6380,7 +6380,7 @@ void main() {
 
 							if childTexture != nil && childBlend != nil && childTransform != nil {
 								if frameCounter%60 == 0 {
-									fmt.Printf("[GROUP] Compositing child %d to group framebuffer\n", childEntity)
+									//fmt.Printf("[GROUP] Compositing child %d to group framebuffer\n", childEntity)
 								}
 
 								// Composite the child using its texture index
@@ -6406,7 +6406,7 @@ void main() {
 				} else if entity == layerBg {
 					// Render background layer - solid color full-screen quad
 					if frameCounter%60 == 0 {
-						fmt.Printf("[BACKGROUND] Rendering background layer (entity %d)\n", entity)
+						//fmt.Printf("[BACKGROUND] Rendering background layer (entity %d)\n", entity)
 					}
 					cmd.BindPipeline(vk.PIPELINE_BIND_POINT_GRAPHICS, uiRectPipeline)
 					cmd.SetViewport(0, []vk.Viewport{{
@@ -6456,7 +6456,7 @@ void main() {
 					// Render button base rectangles only (no text)
 					//buttonCount := len(world.QueryUIButtons())
 					if frameCounter%60 == 0 { // Log every 60 frames to avoid spam
-						//fmt.Printf("[UI] Rendering %d button bases (undoValid=%v)\n", buttonCount, undoValid)
+						////fmt.Printf("[UI] Rendering %d button bases (undoValid=%v)\n", buttonCount, undoValid)
 					}
 					systems.RenderUIButtonBases(world, uiCtx)
 				} else if entity == uiButtonTextLayer {
@@ -6598,12 +6598,12 @@ void main() {
 					if entity == layerBg {
 						blendMode.Opacity = float32(math.Sin(float64(time.Now().UnixMilli())/1000.0))/2.0 + 0.5
 
-						//fmt.Printf("[BACKGROUND] Compositing background layer (textureIndex=%d, opacity=%.2f)\n",
+						////fmt.Printf("[BACKGROUND] Compositing background layer (textureIndex=%d, opacity=%.2f)\n",
 						//	textureData.TextureIndex, blendMode.Opacity)
 					}
 
 					if frameCounter%60 == 0 && world.IsGroup(entity) {
-						fmt.Printf("[GROUP COMPOSITE] Entity=%d, TextureIndex=%d, Opacity=%.2f\n",
+						//fmt.Printf("[GROUP COMPOSITE] Entity=%d, TextureIndex=%d, Opacity=%.2f\n",
 							entity, textureData.TextureIndex, blendMode.Opacity)
 					}
 
@@ -6657,7 +6657,7 @@ void main() {
 			}
 
 			if frameCounter%60 == 0 { // Log every 60 frames
-				//fmt.Printf("[UI] Updating buttons: mouse=(%.1f,%.1f), down=%v, buttons=%d\n",
+				////fmt.Printf("[UI] Updating buttons: mouse=(%.1f,%.1f), down=%v, buttons=%d\n",
 				//	mouseX, mouseY, mouseButtonDown, len(world.QueryUIButtons()))
 			}
 
@@ -6729,7 +6729,7 @@ void main() {
 			currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT
 
 			if frameCounter%60 == 61 { // Log every 60 frames
-				fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
+				//fmt.Printf("FPS: %f | milliseconds per 60 frames: %d\n", 60.0/float32(time.Now().UnixMilli()-timer)*1000, time.Now().UnixMilli()-timer)
 				timer = time.Now().UnixMilli()
 			}
 

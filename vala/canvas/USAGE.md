@@ -101,7 +101,7 @@ x, y := canvas.PageToPixel(page.X, page.Y)
 pages := canvas.GetPagesInRect(500, 500, 1024, 1024)
 // Returns all pages that overlap this region
 for _, page := range pages {
-    fmt.Printf("Page (%d, %d)\n", page.X, page.Y)
+    //fmt.Printf("Page (%d, %d)\n", page.X, page.Y)
 }
 ```
 

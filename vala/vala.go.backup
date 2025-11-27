@@ -133,7 +133,7 @@ func LoadImage(path string) (*ImageData, error) {
 		return nil, fmt.Errorf("failed to decode image: %v", err)
 	}
 
-	fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
+	//fmt.Printf("Loaded %s image: %dx%d\n", format, img.Bounds().Dx(), img.Bounds().Dy())
 
 	// Convert to RGBA
 	bounds := img.Bounds()
@@ -171,11 +171,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("Required Vulkan extensions: %v\n", exts)
+	//fmt.Printf("Required Vulkan extensions: %v\n", exts)
 
 	// Create Vulkan instance WITH the required extensions
 	version, _ := vk.EnumerateInstanceVersion()
-	fmt.Printf("Vulkan %d.%d.%d\n",
+	//fmt.Printf("Vulkan %d.%d.%d\n",
 		vk.ApiVersionMajor(version),
 		vk.ApiVersionMinor(version),
 		vk.ApiVersionPatch(version))
@@ -196,7 +196,7 @@ func main() {
 	defer instance.Destroy()
 
 	devices, _ := instance.EnumeratePhysicalDevices()
-	fmt.Printf("Found %d physical devices\n", len(devices))
+	//fmt.Printf("Found %d physical devices\n", len(devices))
 
 	// Create the surface
 	surfHandle, err := window.VulkanCreateSurface(instance.Handle())
@@ -204,7 +204,7 @@ func main() {
 		panic(err)
 	}
 	surface := vk.NewSurfaceKHR(surfHandle)
-	fmt.Printf("Created Vulkan surface: %v\n", surface)
+	//fmt.Printf("Created Vulkan surface: %v\n", surface)
 
 	// Test surface queries with first physical device
 	if len(devices) > 0 {
@@ -215,19 +215,19 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nSurface Capabilities:\n")
-		fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
-		fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
+		//fmt.Printf("\nSurface Capabilities:\n")
+		//fmt.Printf("  Min images: %d, Max images: %d\n", caps.MinImageCount, caps.MaxImageCount)
+		//fmt.Printf("  Current extent: %dx%d\n", caps.CurrentExtent.Width, caps.CurrentExtent.Height)
 
 		// Query surface formats
 		formats, err := device.GetSurfaceFormatsKHR(surface)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nAvailable formats: %d\n", len(formats))
+		//fmt.Printf("\nAvailable formats: %d\n", len(formats))
 		for i, format := range formats {
 			if i < 3 { // Just print first 3
-				fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
+				//fmt.Printf("  Format: %d, ColorSpace: %d\n", format.Format, format.ColorSpace)
 			}
 		}
 
@@ -236,9 +236,9 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("\nAvailable present modes: %d\n", len(modes))
+		//fmt.Printf("\nAvailable present modes: %d\n", len(modes))
 		for _, mode := range modes {
-			fmt.Printf("  Mode: %d\n", mode)
+			//fmt.Printf("  Mode: %d\n", mode)
 		}
 	}
 
@@ -247,11 +247,11 @@ func main() {
 
 		// Find a graphics queue family that supports presentation
 		queueFamilies := physicalDevice.GetQueueFamilyProperties()
-		fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
+		//fmt.Printf("\nQueue families: %d\n", len(queueFamilies))
 
 		graphicsFamily := -1
 		for i, family := range queueFamilies {
-			fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
+			//fmt.Printf("  Family %d: queues=%d, flags=%d\n", i, family.QueueCount, family.QueueFlags)
 
 			// Check if supports graphics
 			if family.QueueFlags&vk.QUEUE_GRAPHICS_BIT != 0 {
@@ -267,7 +267,7 @@ func main() {
 			panic("No suitable queue family found!")
 		}
 
-		fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
+		//fmt.Printf("\nUsing queue family %d for graphics\n", graphicsFamily)
 
 		// Create device
 		device, err := physicalDevice.CreateDevice(&vk.DeviceCreateInfo{
@@ -291,7 +291,7 @@ func main() {
 		fmt.Println("Logical device created!")
 
 		queue := device.GetQueue(uint32(graphicsFamily), 0)
-		fmt.Printf("Got queue: %v\n", queue)
+		//fmt.Printf("Got queue: %v\n", queue)
 
 		// Create swapchain
 		swapchain, swapFormat, swapExtent, err := vk.CreateSwapchain(
@@ -306,16 +306,16 @@ func main() {
 		}
 		defer device.DestroySwapchainKHR(swapchain)
 
-		fmt.Printf("\nSwapchain created!\n")
-		fmt.Printf("  Format: %d\n", swapFormat)
-		fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
+		//fmt.Printf("\nSwapchain created!\n")
+		//fmt.Printf("  Format: %d\n", swapFormat)
+		//fmt.Printf("  Extent: %dx%d\n", swapExtent.Width, swapExtent.Height)
 
 		// Get swapchain images
 		swapImages, err := device.GetSwapchainImagesKHR(swapchain)
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("  Images: %d\n", len(swapImages))
+		//fmt.Printf("  Images: %d\n", len(swapImages))
 
 		swapImageViews, err := vk.CreateSwapchainImageViews(device, swapImages, swapFormat)
 		if err != nil {
@@ -327,7 +327,7 @@ func main() {
 			}
 		}()
 
-		fmt.Printf("  Image views: %d\n", len(swapImageViews))
+		//fmt.Printf("  Image views: %d\n", len(swapImageViews))
 
 		compiler := shaderc.NewCompiler()
 		defer compiler.Release()
@@ -671,7 +671,7 @@ func main() {
 		textureData := imageData.Pixels
 		textureSize := uint64(len(textureData))
 
-		fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, textureHeight, textureSize)
+		//fmt.Printf("Loaded texture: %dx%d (%d bytes)\n", textureWidth, textureHeight, textureSize)
 
 		// Create staging buffer
 		stagingBuffer, stagingMemory, err := device.CreateBufferWithMemory(
@@ -911,7 +911,7 @@ func main() {
 
 		// Create a layer entity for the Djungelskog texture
 		layer1 := world.CreateEntity()
-		fmt.Printf("Created layer entity: %d\n", layer1)
+		//fmt.Printf("Created layer entity: %d\n", layer1)
 
 		// Add Transform component
 		transform1 := ecs.NewTransform()
@@ -940,7 +940,7 @@ func main() {
 		// Add BlendMode component (visible, opaque)
 		world.AddBlendMode(layer1, ecs.NewBlendMode())
 
-		fmt.Printf("Layer 1 configured with %d components\n", 4)
+		//fmt.Printf("Layer 1 configured with %d components\n", 4)
 
 		// Create framebuffer for layer 1
 		layer1Image, layer1ImageMemory, err := device.CreateImageWithMemory(
@@ -1027,7 +1027,7 @@ func main() {
 
 		// Create a second layer entity (demonstrating multi-layer support)
 		layer2 := world.CreateEntity()
-		fmt.Printf("Created layer entity: %d\n", layer2)
+		//fmt.Printf("Created layer entity: %d\n", layer2)
 
 		// Add Transform component (with higher ZIndex to be in front)
 		transform2 := ecs.NewTransform()
@@ -1141,8 +1141,8 @@ func main() {
 		layer2Pipeline.CompositeDescriptorSet = layer2CompositeDescSet
 		})
 
-		fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
-		fmt.Printf("Total entities in world: %d\n", world.EntityCount())
+		//fmt.Printf("Layer 2 configured with %d components (50%% opacity)\n", 4)
+		//fmt.Printf("Total entities in world: %d\n", world.EntityCount())
 
 
 		// === Initial Image Layout Transitions ===

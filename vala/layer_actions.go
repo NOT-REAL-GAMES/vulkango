@@ -144,8 +144,8 @@ func (r *ActionRecorder) RecordStroke(stroke Stroke) {
 	}
 	r.history = append(r.history, action)
 	r.index = len(r.history)
-	fmt.Printf("Recorded stroke action: %d pen states, total history: %d actions\n",
-		len(strokeCopy.States), len(r.history))
+	//fmt.Printf("Recorded stroke action: %d pen states, total history: %d actions\n",
+	//	len(strokeCopy.States), len(r.history))
 }
 
 // RecordLayerVisibility adds a visibility change action to the history
@@ -166,7 +166,7 @@ func (r *ActionRecorder) RecordLayerVisibility(entityID ecs.Entity, oldVisible, 
 	}
 	r.history = append(r.history, action)
 	r.index = len(r.history)
-	fmt.Printf("Recorded layer visibility change: layer=%d, %v→%v, savedOpacity=%.2f\n", entityID, oldVisible, newVisible, savedOpacity)
+	//fmt.Printf("Recorded layer visibility change: layer=%d, %v→%v, savedOpacity=%.2f\n", entityID, oldVisible, newVisible, savedOpacity)
 }
 
 // RecordLayerOpacity adds an opacity change action to the history
@@ -186,7 +186,7 @@ func (r *ActionRecorder) RecordLayerOpacity(entityID ecs.Entity, oldOpacity, new
 	}
 	r.history = append(r.history, action)
 	r.index = len(r.history)
-	fmt.Printf("Recorded layer opacity change: layer=%d, %.2f→%.2f\n", entityID, oldOpacity, newOpacity)
+	//fmt.Printf("Recorded layer opacity change: layer=%d, %.2f→%.2f\n", entityID, oldOpacity, newOpacity)
 }
 
 // RecordLayerTransform adds a transform change action to the history
@@ -206,14 +206,14 @@ func (r *ActionRecorder) RecordLayerTransform(entityID ecs.Entity, oldTransform,
 	}
 	r.history = append(r.history, action)
 	r.index = len(r.history)
-	fmt.Printf("Recorded layer transform change: layer=%d\n", entityID)
+	//fmt.Printf("Recorded layer transform change: layer=%d\n", entityID)
 }
 
 // Undo moves back one action in the history
 func (r *ActionRecorder) Undo() bool {
 	if r.index > 0 {
 		r.index--
-		fmt.Printf("Undo: reverting to action %d/%d\n", r.index, len(r.history))
+		//fmt.Printf("Undo: reverting to action %d/%d\n", r.index, len(r.history))
 		return true
 	}
 	fmt.Println("Nothing to undo")
@@ -224,7 +224,7 @@ func (r *ActionRecorder) Undo() bool {
 func (r *ActionRecorder) Redo() bool {
 	if r.index < len(r.history) {
 		r.index++
-		fmt.Printf("Redo: advancing to action %d/%d\n", r.index, len(r.history))
+		//fmt.Printf("Redo: advancing to action %d/%d\n", r.index, len(r.history))
 		return true
 	}
 	fmt.Println("Nothing to redo")
