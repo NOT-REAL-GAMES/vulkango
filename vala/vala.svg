@@ -4,7 +4,7 @@
  <defs>
   <radialGradient id="radialGradient27" cx="500.07" cy="443.22" r="71.452" gradientTransform="matrix(.88918 0 0 .86693 51.946 59.217)" gradientUnits="userSpaceOnUse">
    <stop stop-color="#f1d8d8" offset="0"/>
-   <stop stop-color="hsl(337, 71.69, 73.909)" stop-opacity=".479" offset="1"/>
+   <stop stop-color="#c29a9a" stop-opacity=".479" offset="1"/>
   </radialGradient>
   <linearGradient id="linearGradient146" x1="361.67" x2="642.14" y1="497.58" y2="497.58" gradientUnits="userSpaceOnUse">
    <stop stop-color="#302121" offset="0"/>

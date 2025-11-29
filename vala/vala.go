@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
+	ffmpeggo "github.com/NOT-REAL-GAMES/ffmpeggo"
 	sdl "github.com/NOT-REAL-GAMES/sdl3go"
 	vk "github.com/NOT-REAL-GAMES/vulkango"
 	shaderc "github.com/NOT-REAL-GAMES/vulkango/shaderc"
@@ -574,13 +575,15 @@ var frameCounter uint64 // Frame counter for garbage collection timing
 // Image Recycling Pool - avoids expensive vkFreeMemory calls on Windows WDDM
 // Pool images instead of freeing them during scrubbing for better performance
 type RecyclableImage struct {
-	Image    vk.Image
-	Memory   vk.DeviceMemory
-	Size     uint32 // Image dimensions (square textures, so just one value)
+	Image     vk.Image
+	Memory    vk.DeviceMemory
+	Size      uint32 // Image dimensions (square textures, so just one value)
 	MipLevels uint32
 }
+
 var imagePool []RecyclableImage
 var imagePoolMutex sync.Mutex
+
 const MAX_POOLED_IMAGES = 32 // Limit pool size to prevent unbounded memory growth
 
 // GPU memory operation mutex - prevents concurrent allocation/deallocation
@@ -1072,6 +1075,13 @@ func main() {
 	}
 	defer instance.Destroy()
 
+	// Load instance-level video extension functions for H.264 encoding support
+	if vk.LoadVideoExtensionsInstance(instance) {
+		fmt.Println("Loaded video extension functions from instance")
+	} else {
+		fmt.Println("WARNING: Failed to load video extension functions from instance")
+	}
+
 	devices, _ := instance.EnumeratePhysicalDevices()
 	//fmt.Printf("Found %d physical devices\n", len(devices))
 
@@ -1156,17 +1166,45 @@ func main() {
 			fmt.Println("WARNING: Sparse binding not supported! Falling back to dense canvas.")
 		}
 
+		// Find video encode queue family for H.264 encoding
+		videoEncodeFamily := -1
+		videoEncodeQueueIdx, err := physicalDevice.GetVideoQueueFamilyIndex(vk.VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR)
+		if err == nil {
+			videoEncodeFamily = int(videoEncodeQueueIdx)
+			fmt.Printf("Found video encode queue family: %d\n", videoEncodeFamily)
+		} else {
+			fmt.Printf("WARNING: No video encode queue family found: %v\n", err)
+		}
+
+		// Build queue create infos
+		queueCreateInfos := []vk.DeviceQueueCreateInfo{
+			{
+				QueueFamilyIndex: uint32(graphicsFamily),
+				QueuePriorities:  []float32{1.0},
+			},
+		}
+
+		// Add video encode queue if available and different from graphics
+		if videoEncodeFamily != -1 && videoEncodeFamily != graphicsFamily {
+			queueCreateInfos = append(queueCreateInfos, vk.DeviceQueueCreateInfo{
+				QueueFamilyIndex: uint32(videoEncodeFamily),
+				QueuePriorities:  []float32{1.0},
+			})
+			fmt.Printf("Added separate video encode queue family: %d\n", videoEncodeFamily)
+		} else if videoEncodeFamily == graphicsFamily {
+			fmt.Println("Video encode uses same queue family as graphics")
+		}
+
 		// Create device with sparse binding enabled
 		device, err := physicalDevice.CreateDevice(&vk.DeviceCreateInfo{
-			QueueCreateInfos: []vk.DeviceQueueCreateInfo{
-				{
-					QueueFamilyIndex: uint32(graphicsFamily),
-					QueuePriorities:  []float32{1.0},
-				},
-			},
+			QueueCreateInfos: queueCreateInfos,
 			EnabledExtensionNames: []string{
 				"VK_KHR_swapchain",
 				"VK_EXT_blend_operation_advanced",
+				"VK_KHR_video_queue",
+				"VK_KHR_video_encode_queue",
+				"VK_KHR_video_encode_h264",
+				"VK_KHR_video_encode_h265",
 			},
 			EnabledFeatures: &vk.PhysicalDeviceFeatures{
 				SparseBinding:          features.SparseBinding,          // Enable sparse binding
@@ -4557,6 +4595,411 @@ void main() {
 			}
 		}
 
+		// === Video Export Functions ===
+		// readFrameTexture downloads frame texture data from GPU to CPU (RGBA format)
+		readFrameTexture := func(frameNum int) ([]byte, uint32, uint32, error) {
+			frameTexturesMutex.RLock()
+			ft := frameTextures[frameNum]
+			frameTexturesMutex.RUnlock()
+
+			if ft == nil {
+				return nil, 0, 0, fmt.Errorf("frame %d not found", frameNum)
+			}
+
+			// Skip low-res proxies - they need to be upgraded first
+			if ft.IsLowRes {
+				return nil, 0, 0, fmt.Errorf("frame %d is low-res proxy, cannot export", frameNum)
+			}
+
+			width := ft.ActualWidth
+			height := ft.ActualHeight
+			dataSize := width * height * 4 // RGBA
+
+			// Create staging buffer for download
+			bufferInfo := vk.BufferCreateInfo{
+				Size:        uint64(dataSize),
+				Usage:       vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+				SharingMode: vk.SHARING_MODE_EXCLUSIVE,
+			}
+
+			stagingBuffer, err := device.CreateBuffer(&bufferInfo)
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("failed to create staging buffer: %w", err)
+			}
+			defer device.DestroyBuffer(stagingBuffer)
+
+			memReqs := device.GetBufferMemoryRequirements(stagingBuffer)
+			memProps := physicalDevice.GetMemoryProperties()
+			memTypeIndex, found := vk.FindMemoryType(memProps, memReqs.MemoryTypeBits,
+				vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT|vk.MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			if !found {
+				return nil, 0, 0, fmt.Errorf("failed to find suitable memory type")
+			}
+
+			stagingMemory, err := device.AllocateMemory(&vk.MemoryAllocateInfo{
+				AllocationSize:  memReqs.Size,
+				MemoryTypeIndex: memTypeIndex,
+			})
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("failed to allocate staging memory: %w", err)
+			}
+			defer device.FreeMemory(stagingMemory)
+
+			err = device.BindBufferMemory(stagingBuffer, stagingMemory, 0)
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("failed to bind staging buffer memory: %w", err)
+			}
+
+			// Create command buffer
+			cmdBufs, err := device.AllocateCommandBuffers(&vk.CommandBufferAllocateInfo{
+				CommandPool:        commandPool,
+				Level:              vk.COMMAND_BUFFER_LEVEL_PRIMARY,
+				CommandBufferCount: 1,
+			})
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("failed to allocate command buffer: %w", err)
+			}
+			cmd := cmdBufs[0]
+			defer device.FreeCommandBuffers(commandPool, cmdBufs)
+
+			cmd.Begin(&vk.CommandBufferBeginInfo{
+				Flags: vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			})
+
+			// Transition frame image to TRANSFER_SRC
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               ft.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			// Copy image to buffer
+			cmd.CopyImageToBuffer(ft.Image, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuffer, []vk.BufferImageCopy{{
+				BufferOffset:      0,
+				BufferRowLength:   0,
+				BufferImageHeight: 0,
+				ImageSubresource: vk.ImageSubresourceLayers{
+					AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+					MipLevel:       0,
+					BaseArrayLayer: 0,
+					LayerCount:     1,
+				},
+				ImageOffset: vk.Offset3D{X: 0, Y: 0, Z: 0},
+				ImageExtent: vk.Extent3D{Width: width, Height: height, Depth: 1},
+			}})
+
+			// Transition back to SHADER_READ_ONLY
+			cmd.PipelineBarrier(
+				vk.PIPELINE_STAGE_TRANSFER_BIT,
+				vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0,
+				[]vk.ImageMemoryBarrier{{
+					SrcAccessMask:       vk.ACCESS_TRANSFER_READ_BIT,
+					DstAccessMask:       vk.ACCESS_SHADER_READ_BIT,
+					OldLayout:           vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					NewLayout:           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					SrcQueueFamilyIndex: ^uint32(0),
+					DstQueueFamilyIndex: ^uint32(0),
+					Image:               ft.Image,
+					SubresourceRange: vk.ImageSubresourceRange{
+						AspectMask:     vk.IMAGE_ASPECT_COLOR_BIT,
+						BaseMipLevel:   0,
+						LevelCount:     1,
+						BaseArrayLayer: 0,
+						LayerCount:     1,
+					},
+				}},
+			)
+
+			cmd.End()
+
+			// Submit and wait
+			queue.Submit([]vk.SubmitInfo{{CommandBuffers: []vk.CommandBuffer{cmd}}}, vk.Fence{})
+			queue.WaitIdle()
+
+			// Read data from staging buffer
+			data := make([]byte, dataSize)
+			ptr, err := device.MapMemory(stagingMemory, 0, uint64(dataSize))
+			if err != nil {
+				return nil, 0, 0, fmt.Errorf("failed to map staging memory: %w", err)
+			}
+			copy(data, (*[1 << 30]byte)(ptr)[:dataSize:dataSize])
+			device.UnmapMemory(stagingMemory)
+
+			return data, width, height, nil
+		}
+
+		// exportVideo exports all frames to an MP4 video file
+		exportVideo := func(outputPath string) error {
+			fmt.Printf("Starting video export to %s...\n", outputPath)
+
+			// Count valid (non-low-res) frames
+			validFrames := make([]int, 0)
+			frameTexturesMutex.RLock()
+			for frameNum, ft := range frameTextures {
+				if ft != nil && !ft.IsLowRes {
+					validFrames = append(validFrames, frameNum)
+				}
+			}
+			frameTexturesMutex.RUnlock()
+
+			if len(validFrames) == 0 {
+				return fmt.Errorf("no valid frames to export (all frames are low-res proxies)")
+			}
+
+			// Sort frames by frame number
+			for i := 0; i < len(validFrames)-1; i++ {
+				for j := i + 1; j < len(validFrames); j++ {
+					if validFrames[i] > validFrames[j] {
+						validFrames[i], validFrames[j] = validFrames[j], validFrames[i]
+					}
+				}
+			}
+
+			fmt.Printf("Found %d valid frames to export (frames %v)\n", len(validFrames), validFrames)
+
+			// Read first frame to get dimensions
+			firstData, width, height, err := readFrameTexture(validFrames[0])
+			if err != nil {
+				return fmt.Errorf("failed to read first frame: %w", err)
+			}
+
+			// Create encoder
+			config := vk.DefaultH264Config(width, height)
+			config.FrameRateNum = uint32(timeline.FPS)
+			config.FrameRateDen = 1
+			config.GOPSize = 30 // Keyframe every 30 frames
+
+			encoder, err := vk.NewH264Encoder(device, physicalDevice, config)
+			if err != nil {
+				return fmt.Errorf("failed to create encoder: %w", err)
+			}
+			defer encoder.Destroy()
+
+			// Encode first frame
+			fmt.Printf("Encoding frame 0/%d...\n", len(validFrames))
+			// Debug: Check for non-black pixels
+			nonBlack := 0
+			for p := 0; p < len(firstData) && p < 1000000; p += 4 {
+				if firstData[p] > 10 || firstData[p+1] > 10 || firstData[p+2] > 10 {
+					nonBlack++
+				}
+			}
+			fmt.Printf("  Frame 0: %d non-black pixels in first 250k pixels\n", nonBlack)
+			_, err = encoder.EncodeFrame(firstData, width, height)
+			if err != nil {
+				return fmt.Errorf("failed to encode frame 0: %w", err)
+			}
+
+			// Encode remaining frames
+			for i := 1; i < len(validFrames); i++ {
+				frameNum := validFrames[i]
+				fmt.Printf("Encoding frame %d/%d (frame #%d)...\n", i, len(validFrames), frameNum)
+
+				frameData, _, _, err := readFrameTexture(frameNum)
+				if err != nil {
+					return fmt.Errorf("failed to read frame %d: %w", frameNum, err)
+				}
+
+				// Debug: Check for non-black pixels
+				nonBlack := 0
+				for p := 0; p < len(frameData) && p < 1000000; p += 4 {
+					if frameData[p] > 10 || frameData[p+1] > 10 || frameData[p+2] > 10 {
+						nonBlack++
+					}
+				}
+				fmt.Printf("  Frame %d: %d non-black pixels in first 250k pixels\n", frameNum, nonBlack)
+
+				_, err = encoder.EncodeFrame(frameData, width, height)
+				if err != nil {
+					return fmt.Errorf("failed to encode frame %d: %w", frameNum, err)
+				}
+			}
+
+			// Write output file
+			err = encoder.WriteToFile(outputPath)
+			if err != nil {
+				return fmt.Errorf("failed to write video file: %w", err)
+			}
+
+			fmt.Printf("Video export complete! Saved to %s\n", outputPath)
+			return nil
+		}
+
+		// exportVideoHEVC exports all frames to an MP4 video file using HEVC/H.265 codec
+		// If withAlpha is true, exports a separate alpha matte video
+		exportVideoHEVC := func(outputPath string, withAlpha bool) error {
+			fmt.Printf("Starting HEVC video export to %s (alpha=%v)...\n", outputPath, withAlpha)
+
+			// Check for hardware H.265 encoding support
+			hwSupported := physicalDevice.CheckH265EncodeSupport()
+			fmt.Printf("H.265 hardware encode support check: %v\n", hwSupported)
+
+			// Count valid (non-low-res) frames
+			validFrames := make([]int, 0)
+			frameTexturesMutex.RLock()
+			for frameNum, ft := range frameTextures {
+				if ft != nil && !ft.IsLowRes {
+					validFrames = append(validFrames, frameNum)
+				}
+			}
+			frameTexturesMutex.RUnlock()
+
+			if len(validFrames) == 0 {
+				return fmt.Errorf("no valid frames to export (all frames are low-res proxies)")
+			}
+
+			// Sort frames by frame number
+			for i := 0; i < len(validFrames)-1; i++ {
+				for j := i + 1; j < len(validFrames); j++ {
+					if validFrames[i] > validFrames[j] {
+						validFrames[i], validFrames[j] = validFrames[j], validFrames[i]
+					}
+				}
+			}
+
+			fmt.Printf("Found %d valid frames to export (frames %v)\n", len(validFrames), validFrames)
+
+			// Read first frame to get dimensions
+			firstData, width, height, err := readFrameTexture(validFrames[0])
+			if err != nil {
+				return fmt.Errorf("failed to read first frame: %w", err)
+			}
+
+			// Create encoder config
+			var config vk.HEVCEncoderConfig
+			if withAlpha {
+				config = vk.DefaultHEVCConfigWithAlpha(width, height)
+			} else {
+				config = vk.DefaultHEVCConfig(width, height)
+			}
+			config.FrameRateNum = uint32(timeline.FPS)
+			config.FrameRateDen = 1
+			config.GOPSize = 30
+
+			// Try hardware encoder first if supported
+			// TEMPORARILY DISABLED: Hardware encoder crashes in vkEndCommandBuffer
+			if false && hwSupported {
+				fmt.Println("GPU hardware H.265 encoding: SUPPORTED - attempting hardware encode...")
+
+				hwEncoder, err := vk.NewH265HardwareEncoder(device, physicalDevice, config)
+				fmt.Printf("Hardware encoder creation result: err=%v\n", err)
+				if err == nil {
+					defer hwEncoder.Destroy()
+
+					// Encode first frame
+					fmt.Printf("Encoding frame 0/%d (HEVC HW)...\n", len(validFrames))
+					err = hwEncoder.AddFrame(firstData)
+					if err != nil {
+						fmt.Printf("Hardware encoding failed on first frame: %v\n", err)
+						fmt.Println("Falling back to software encoder...")
+						goto softwareEncode
+					}
+
+					// Encode remaining frames
+					for i := 1; i < len(validFrames); i++ {
+						frameNum := validFrames[i]
+						fmt.Printf("Encoding frame %d/%d (HEVC HW, frame #%d)...\n", i, len(validFrames), frameNum)
+
+						frameData, _, _, err := readFrameTexture(frameNum)
+						if err != nil {
+							return fmt.Errorf("failed to read frame %d: %w", frameNum, err)
+						}
+
+						err = hwEncoder.AddFrame(frameData)
+						if err != nil {
+							fmt.Printf("Hardware encoding failed on frame %d: %v\n", frameNum, err)
+							fmt.Println("Falling back to software encoder...")
+							goto softwareEncode
+						}
+					}
+
+					// Write output file
+					err = hwEncoder.Finish(outputPath)
+					if err != nil {
+						return fmt.Errorf("failed to write video file: %w", err)
+					}
+
+					fmt.Printf("HEVC video export complete (hardware encoded)! Saved to %s\n", outputPath)
+					if withAlpha {
+						fmt.Printf("Note: Alpha channel embedding not yet implemented\n")
+					}
+					return nil
+				} else {
+					fmt.Printf("Hardware encoder creation failed: %v\n", err)
+					fmt.Println("Falling back to software encoder...")
+				}
+			} else {
+				fmt.Println("GPU hardware H.265 encoding: NOT SUPPORTED - using software encoder")
+			}
+
+		softwareEncode:
+			// Software encoder using pure Go ffmpeggo
+			fmt.Println("Using pure Go HEVC encoder (ffmpeggo)...")
+			fps := float64(config.FrameRateNum) / float64(config.FrameRateDen)
+			encoder, err := ffmpeggo.NewVideoEncoder(outputPath, int(width), int(height), fps)
+			if err != nil {
+				return fmt.Errorf("failed to create ffmpeggo encoder: %w", err)
+			}
+			defer encoder.Close()
+
+			// Encode first frame
+			fmt.Printf("Encoding frame 0/%d (HEVC ffmpeggo)...\n", len(validFrames))
+			err = encoder.EncodeRGBA(firstData)
+			if err != nil {
+				return fmt.Errorf("failed to encode frame 0: %w", err)
+			}
+
+			// Encode remaining frames
+			for i := 1; i < len(validFrames); i++ {
+				frameNum := validFrames[i]
+				fmt.Printf("Encoding frame %d/%d (HEVC ffmpeggo, frame #%d)...\n", i, len(validFrames), frameNum)
+
+				frameData, _, _, err := readFrameTexture(frameNum)
+				if err != nil {
+					return fmt.Errorf("failed to read frame %d: %w", frameNum, err)
+				}
+
+				err = encoder.EncodeRGBA(frameData)
+				if err != nil {
+					return fmt.Errorf("failed to encode frame %d: %w", frameNum, err)
+				}
+			}
+
+			// Close finalizes the video
+			err = encoder.Close()
+			if err != nil {
+				return fmt.Errorf("failed to finalize video file: %w", err)
+			}
+
+			fmt.Printf("HEVC video export complete (ffmpeggo)! Saved to %s\n", outputPath)
+			if withAlpha {
+				fmt.Printf("Note: Alpha channel embedding not yet implemented\n")
+			}
+			return nil
+		}
+
+		// Mark these functions as used
+		_ = readFrameTexture
+		_ = exportVideo
+		_ = exportVideoHEVC
+
 		// Frame switching synchronization
 		var frameSwitchInProgress bool
 		var pendingFrameSwitch int = -1            // -1 means no pending switch
@@ -5759,6 +6202,30 @@ void main() {
 							} else {
 								fmt.Println("Already at last frame")
 							}
+						}
+
+						// Ctrl+E - Export video (H.264)
+						if ctrl && !shift && keyEvent.Scancode == sdl.SCANCODE_E {
+							fmt.Println("Starting H.264 video export (Ctrl+E pressed)...")
+							go func() {
+								outputPath := "vala_export.mp4"
+								err := exportVideo(outputPath)
+								if err != nil {
+									fmt.Printf("Export failed: %v\n", err)
+								}
+							}()
+						}
+
+						// Ctrl+Shift+E - Export video (HEVC with alpha)
+						if ctrl && shift && keyEvent.Scancode == sdl.SCANCODE_E {
+							fmt.Println("Starting HEVC video export with alpha (Ctrl+Shift+E pressed)...")
+							go func() {
+								outputPath := "vala_export_hevc.mp4"
+								err := exportVideoHEVC(outputPath, true)
+								if err != nil {
+									fmt.Printf("HEVC Export failed: %v\n", err)
+								}
+							}()
 						}
 
 					case sdl.EVENT_DROP_COMPLETE:

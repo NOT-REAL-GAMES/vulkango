@@ -3,3 +3,5 @@
 /.vscode
 *.exe
 /vala/gemini_chat_files
+/vala/FFmpeg-master
+/FFmpeg
