@@ -34,6 +34,25 @@ type mp4Track struct {
 	sampleDts    []int64
 	chunkOffsets []int64
 	syncSamples  []uint32 // Keyframe indices
+	
+	// Track references
+	refs []trackRef
+}
+
+type trackRef struct {
+	refType  string
+	trackIDs []uint32
+}
+
+// AddTrackReference adds a track reference.
+func (m *MP4Muxer) AddTrackReference(fromTrackIdx int, toTrackID int, refType string) {
+	if fromTrackIdx >= 0 && fromTrackIdx < len(m.tracks) {
+		ref := trackRef{
+			refType:  refType,
+			trackIDs: []uint32{uint32(toTrackID)},
+		}
+		m.tracks[fromTrackIdx].refs = append(m.tracks[fromTrackIdx].refs, ref)
+	}
 }
 
 // NewMP4Muxer creates a new MP4 muxer.
@@ -219,18 +238,54 @@ func (m *MP4Muxer) createTrakBox(ctx *FormatContext, trackIdx int) []byte {
 	// tkhd (track header)
 	tkhd := m.createTkhdBox(stream, trackIdx)
 
+	// tref (track reference)
+	var tref []byte
+	if len(track.refs) > 0 {
+		tref = m.createTrefBox(track)
+	}
+
 	// mdia (media)
 	mdia := m.createMdiaBox(ctx, trackIdx)
 
 	// Calculate total size
-	totalSize := 8 + len(tkhd) + len(mdia)
+	totalSize := 8 + len(tkhd) + len(tref) + len(mdia)
 
 	// Write trak header
 	binary.Write(buf, binary.BigEndian, uint32(totalSize))
 	buf.WriteString("trak")
 
 	buf.Write(tkhd)
+	buf.Write(tref)
 	buf.Write(mdia)
+
+	return buf.Bytes()
+}
+
+func (m *MP4Muxer) createTrefBox(track *mp4Track) []byte {
+	buf := new(bytes.Buffer)
+
+	// Inner boxes
+	var innerBoxes []byte
+	for _, ref := range track.refs {
+		// Each reference type is a box
+		// Size = 8 + 4 * num_ids
+		size := uint32(8 + 4*len(ref.trackIDs))
+		
+		refBuf := new(bytes.Buffer)
+		binary.Write(refBuf, binary.BigEndian, size)
+		refBuf.WriteString(ref.refType)
+		
+		for _, id := range ref.trackIDs {
+			binary.Write(refBuf, binary.BigEndian, id)
+		}
+		innerBoxes = append(innerBoxes, refBuf.Bytes()...)
+	}
+
+	// Outer tref box
+	size := uint32(8 + len(innerBoxes))
+	binary.Write(buf, binary.BigEndian, size)
+	buf.WriteString("tref")
+	buf.Write(innerBoxes)
 
 	return buf.Bytes()
 }

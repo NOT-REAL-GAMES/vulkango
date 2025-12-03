@@ -76,6 +76,15 @@ func (ctx *FormatContext) AddStream() *Stream {
 	return s
 }
 
+// AddTrackReference adds a track reference from one stream to another.
+// This is used for features like alpha channels (auxl).
+func (ctx *FormatContext) AddTrackReference(fromStreamIndex, toStreamIndex int, refType string) {
+	if muxer, ok := ctx.priv.(*MP4Muxer); ok {
+		// Track IDs are 1-based, usually index + 1
+		muxer.AddTrackReference(fromStreamIndex, toStreamIndex+1, refType)
+	}
+}
+
 // Close closes the output file.
 func (ctx *FormatContext) Close() error {
 	if f, ok := ctx.output.(*os.File); ok {

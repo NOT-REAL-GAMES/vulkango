@@ -34,6 +34,7 @@ const (
 	PixFmtYUV420P10BE      // Planar YUV 4:2:0, 10bpp, big-endian
 	PixFmtYUV422P10LE      // Planar YUV 4:2:2, 10bpp, little-endian
 	PixFmtYUV444P10LE      // Planar YUV 4:4:4, 10bpp, little-endian
+	PixFmtYUVA420P         // Planar YUV 4:2:0 + Alpha
 )
 
 // SampleFormat describes the sample format of audio data.

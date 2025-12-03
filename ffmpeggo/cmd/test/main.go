@@ -16,7 +16,7 @@ func main() {
 	duration := 2 // seconds
 
 	fmt.Println("Creating video encoder...")
-	enc, err := ffmpeggo.NewVideoEncoder("/tmp/ffmpeggo_test.mp4", width, height, fps)
+	enc, err := ffmpeggo.NewVideoEncoder("/tmp/ffmpeggo_test.mp4", width, height, fps, false)
 	if err != nil {
 		log.Fatal(err)
 	}

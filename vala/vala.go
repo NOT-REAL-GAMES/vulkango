@@ -4953,7 +4953,7 @@ void main() {
 			// Software encoder using pure Go ffmpeggo
 			fmt.Println("Using pure Go HEVC encoder (ffmpeggo)...")
 			fps := float64(config.FrameRateNum) / float64(config.FrameRateDen)
-			encoder, err := ffmpeggo.NewVideoEncoder(outputPath, int(width), int(height), fps)
+			encoder, err := ffmpeggo.NewVideoEncoder(outputPath, int(width), int(height), fps, true)
 			if err != nil {
 				return fmt.Errorf("failed to create ffmpeggo encoder: %w", err)
 			}
